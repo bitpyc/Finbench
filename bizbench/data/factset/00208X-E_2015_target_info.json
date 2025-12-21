@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "00208X-E",
+  "entity_proper_name": "NVIDIA Corp.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 20991,
+  "industry": "Electronic Components",
+  "top_segments": [
+    "Technology",
+    "Unclassifiable"
+  ],
+  "cutoff_date": "2015-12-31",
+  "decision_year": 2015,
+  "self_profile": {
+    "factset_entity_id": "00208X-E",
+    "company_id": 20991,
+    "entity_proper_name": "NVIDIA Corp.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2015-12-31",
+    "industry": "Electronic Components",
+    "top_segments": [
+      "Technology",
+      "Unclassifiable"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-02 15:01:14",
+    "total_suppliers": 32,
+    "historical_suppliers": 13,
+    "future_new_suppliers": 6,
+    "random_noise_suppliers": 13,
+    "positive_samples": 14,
+    "negative_samples": 18
+  }
+}

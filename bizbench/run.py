@@ -6,10 +6,9 @@ import os
 import json
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 from .data_processor import DataProcessor
-from Agents.ace import ACE
-from Agents.cot import ChainOfThoughtAgent
 
 
 def parse_args():
@@ -20,8 +19,10 @@ def parse_args():
         "--agent_method",
         type=str,
         default="ace",
-        choices=["ace", "cot"],
-        help="Agent method to run. 'ace' enables the default ACE loop, 'cot' runs a lightweight chain-of-thought baseline.",
+        choices=["ace", "cot", "dynamic_cheatsheet", "self_refine", "self-refine", "reflexion", "gepa"],
+        help="Agent method to run. 'ace' 为默认流程, 'cot' 是轻量 baseline, "
+        "'dynamic_cheatsheet' 启用动态小抄, "
+        "'self_refine' 采用自我反馈迭代，'reflexion' 为自反思改写，'gepa' 为 prompt 演化。",
     )
     parser.add_argument(
         "--task_name",
@@ -38,9 +39,11 @@ def parse_args():
             "FormulaEval",
             "finer",
             "formula",
+            "factset",
         ],
         help="BizBench task to run",
     )
+    # ace specific knobs
     parser.add_argument("--mode", type=str, default="offline",
                         choices=["offline", "online", "eval_only"],
                         help="Run mode")
@@ -71,12 +74,187 @@ def parse_args():
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--playbook_token_budget", type=int, default=80000)
     parser.add_argument("--test_workers", type=int, default=20)
+    parser.add_argument(
+        "--data_embedding_dir",
+        type=str,
+        default="bizbench/data/data_embedding",
+        help="Embedding CSV 目录，默认 bizbench/data/data_embedding",
+    )
 
     parser.add_argument("--json_mode", action="store_true")
     parser.add_argument("--no_ground_truth", action="store_true")
     parser.add_argument("--use_bulletpoint_analyzer", action="store_true")
     parser.add_argument("--bulletpoint_analyzer_threshold",
                         type=float, default=0.90)
+
+    # self-refine specific knobs
+    parser.add_argument(
+        "--self_refine_rounds",
+        type=int,
+        default=2,
+        help="自我反馈的迭代次数，0 表示仅初始生成。",
+    )
+    parser.add_argument(
+        "--self_refine_initial_temperature",
+        type=float,
+        default=0.0,
+        help="Self-refine 初始回答温度。",
+    )
+    parser.add_argument(
+        "--self_refine_feedback_temperature",
+        type=float,
+        default=0.2,
+        help="Self-refine 反馈-改写阶段温度。",
+    )
+
+    # reflexion specific knobs
+    parser.add_argument(
+        "--reflexion_rounds",
+        type=int,
+        default=2,
+        help="Reflexion 反思-重写的迭代次数，0 表示仅初始生成。",
+    )
+    parser.add_argument(
+        "--reflexion_initial_temperature",
+        type=float,
+        default=0.0,
+        help="Reflexion 初始回答温度。",
+    )
+    parser.add_argument(
+        "--reflexion_reflect_temperature",
+        type=float,
+        default=0.2,
+        help="Reflexion 反思/重写阶段温度。",
+    )
+    parser.add_argument(
+        "--reflexion_strict_sequential",
+        action="store_true",
+        help="开启后全程串行评估+记忆更新（最贴合论文时序，但性能较低）。默认按窗口并行评估、串行更新。",
+    )
+    parser.add_argument(
+        "--reflexion_memory_top_k",
+        type=int,
+        default=3,
+        help="检索同题历史反思的最大条数（精确匹配 question+context，无相似度检索）。",
+    )
+
+    # GEPA specific knobs
+    parser.add_argument(
+        "--gepa_budget",
+        type=int,
+        default=80,
+        help="GEPA: 总预算（按样本评估次数计数）。",
+    )
+    parser.add_argument(
+        "--gepa_window_budget",
+        type=int,
+        default=30,
+        help="GEPA: online 窗口内单窗预算（覆盖总预算均分）。",
+    )
+    parser.add_argument(
+        "--gepa_mini_batch_size",
+        type=int,
+        default=2,
+        help="GEPA: mini-batch 反馈样本数。",
+    )
+    parser.add_argument(
+        "--gepa_num_initial",
+        type=int,
+        default=6,
+        help="GEPA: 初始候选 prompt 数量。",
+    )
+    parser.add_argument(
+        "--gepa_exploit_prob",
+        type=float,
+        default=0.95,
+        help="GEPA: 选择 exploit 的概率 P。",
+    )
+    parser.add_argument(
+        "--gepa_merge_prob",
+        type=float,
+        default=0.9,
+        help="GEPA: 在 exploit 下不 merge 的概率 Q（反之触发 merge）。",
+    )
+    parser.add_argument(
+        "--gepa_seed_prompt",
+        type=str,
+        default=None,
+        help="GEPA: 种子 prompt（为空则用默认 SEED_PROMPT）。",
+    )
+    parser.add_argument(
+        "--gepa_feedback_ratio",
+        type=float,
+        default=0.5,
+        help="GEPA: eval_only 下测试集拆分为反馈集的比例。",
+    )
+    parser.add_argument(
+        "--gepa_max_workers",
+        type=int,
+        default=8,
+        help="GEPA: 并发线程数。",
+    )
+    parser.add_argument(
+        "--gepa_target_temperature",
+        type=float,
+        default=0.0,
+        help="GEPA: 目标模型温度。",
+    )
+    parser.add_argument(
+        "--gepa_reflection_temperature",
+        type=float,
+        default=0.2,
+        help="GEPA: 反思/合并模型温度。",
+    )
+
+
+    # Dynamic Cheatsheet specific knobs
+    parser.add_argument(
+        "--dc_approach",
+        type=str,
+        default="DynamicCheatsheet_RetrievalSynthesis",
+        choices=[
+            "DynamicCheatsheet_Cumulative",
+            "default",
+            "FullHistoryAppending",
+            "Dynamic_Retrieval",
+            "DynamicCheatsheet_RetrievalSynthesis",
+        ],
+        help="Dynamic Cheatsheet approach variant.",
+    )
+    parser.add_argument(
+        "--dc_generator_prompt_path",
+        type=str,
+        default="Agents/dynamic_cheatsheet/prompts/generator_prompt.txt",
+        help="Path to the Dynamic Cheatsheet generator prompt.",
+    )
+    parser.add_argument(
+        "--dc_cheatsheet_prompt_path",
+        type=str,
+        default="Agents/dynamic_cheatsheet/prompts/cheatsheet_cumulative.txt",
+        help="Path to the Dynamic Cheatsheet curator prompt (if required).",
+    )
+    parser.add_argument(
+        "--dc_temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for Dynamic Cheatsheet generations.",
+    )
+    parser.add_argument(
+        "--dc_retrieve_top_k",
+        type=int,
+        default=3,
+        help="Top-k retrieval size for Dynamic Cheatsheet retrieval modes.",
+    )
+    parser.add_argument(
+        "--dc_disable_code_execution",
+        action="store_true",
+        help="Disable EXECUTE CODE! loops for Dynamic Cheatsheet.",
+    )
+    parser.add_argument(
+        "--dc_disable_previous_answers",
+        action="store_true",
+        help="Do not inject previous answers into the cheatsheet context.",
+    )
 
     return parser.parse_args()
 
@@ -146,6 +324,9 @@ def load_initial_playbook(path: str):
 
 def main():
     args = parse_args()
+    if args.agent_method == "self-refine":
+        # 统一成模块友好的命名
+        args.agent_method = "self_refine"
 
     print(f"\n{'='*60}")
     print("BizBench Runner")
@@ -175,28 +356,14 @@ def main():
     elif args.initial_playbook_path:
         print("Warning: --initial_playbook_path is ignored for non-ACE agent methods.\n")
 
-    config = {
-        "num_epochs": args.num_epochs,
-        "max_num_rounds": args.max_num_rounds,
-        "curator_frequency": args.curator_frequency,
-        "eval_steps": args.eval_steps,
-        "online_eval_frequency": args.online_eval_frequency,
-        "save_steps": args.save_steps,
-        "playbook_token_budget": args.playbook_token_budget,
-        "task_name": args.task_name,
-        "mode": args.mode,
-        "json_mode": args.json_mode,
-        "no_ground_truth": args.no_ground_truth,
-        "save_dir": args.save_path,
-        "test_workers": args.test_workers,
-        "initial_playbook_path": args.initial_playbook_path,
-        "use_bulletpoint_analyzer": args.use_bulletpoint_analyzer,
-        "bulletpoint_analyzer_threshold": args.bulletpoint_analyzer_threshold,
-        "api_provider": args.api_provider,
-        "agent_method": args.agent_method,
-    }
+    # 保留所有 CLI 参数到 config，方便 run_config.json 完整记录
+    config = vars(args).copy()
+    # 兼容下游使用的 save_dir 字段
+    config["save_dir"] = args.save_path
 
     if args.agent_method == "ace":
+        from Agents.ace import ACE
+
         ace_system = ACE(
             api_provider=args.api_provider,
             generator_model=args.generator_model,
@@ -217,7 +384,9 @@ def main():
             data_processor=data_processor,
             config=config,
         )
-    else:
+    elif args.agent_method == "cot":
+        from Agents.cot import ChainOfThoughtAgent
+
         if args.mode not in ["online", "eval_only"]:
             raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}")
 
@@ -233,6 +402,127 @@ def main():
             data_processor=data_processor,
             config=config,
         )
+    elif args.agent_method == "dynamic_cheatsheet":
+        from Agents.dynamic_cheatsheet.agent import DynamicCheatsheetConfig
+        from Agents.dynamic_cheatsheet import DynamicCheatsheetAgent
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}")
+
+        dc_config = DynamicCheatsheetConfig(
+            approach_name=args.dc_approach,
+            generator_prompt_path=Path(args.dc_generator_prompt_path),
+            cheatsheet_prompt_path=Path(args.dc_cheatsheet_prompt_path)
+            if args.dc_cheatsheet_prompt_path
+            else None,
+            temperature=args.dc_temperature,
+            max_num_rounds=args.max_num_rounds,
+            retrieve_top_k=args.dc_retrieve_top_k,
+            allow_code_execution=not args.dc_disable_code_execution,
+            add_previous_answers=not args.dc_disable_previous_answers,
+        )
+
+        dc_agent = DynamicCheatsheetAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+            dc_config=dc_config,
+        )
+
+        dc_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )
+    elif args.agent_method == "self_refine":
+        from Agents.self_refine import SelfRefineAgent
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}")
+
+        self_refine_agent = SelfRefineAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            refine_rounds=args.self_refine_rounds,
+            initial_temperature=args.self_refine_initial_temperature,
+            feedback_temperature=args.self_refine_feedback_temperature,
+            agent_method=args.agent_method,
+        )
+
+        self_refine_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )
+    elif args.agent_method == "reflexion":
+        from Agents.reflexion import ReflexionAgent
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}")
+
+        reflexion_agent = ReflexionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            reflexion_rounds=args.reflexion_rounds,
+            initial_temperature=args.reflexion_initial_temperature,
+            reflect_temperature=args.reflexion_reflect_temperature,
+            agent_method=args.agent_method,
+            strict_sequential=args.reflexion_strict_sequential,
+            memory_top_k=args.reflexion_memory_top_k,
+        )
+
+        reflexion_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )
+    elif args.agent_method == "gepa":
+        from Agents.gepa import GEPAAgent
+        from Agents.gepa.config import GepaConfig
+
+        if args.mode not in ["online", "eval_only", "offline"]:
+            raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only/offline 模式，收到 {args.mode}")
+
+        gepa_cfg = GepaConfig(
+            budget=args.gepa_budget,
+            window_budget=args.gepa_window_budget,
+            mini_batch_size=args.gepa_mini_batch_size,
+            num_initial=args.gepa_num_initial,
+            exploit_prob=args.gepa_exploit_prob,
+            merge_prob=args.gepa_merge_prob,
+            seed_prompt=args.gepa_seed_prompt,
+            feedback_ratio=args.gepa_feedback_ratio,
+            max_workers=args.gepa_max_workers,
+            target_temperature=args.gepa_target_temperature,
+            reflection_temperature=args.gepa_reflection_temperature,
+            max_tokens=args.max_tokens,
+        )
+
+        gepa_agent = GEPAAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=args.reflector_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+            gepa_config=gepa_cfg,
+        )
+
+        gepa_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+            train_samples=train_samples,
+            val_samples=val_samples,
+        )
+    else:
+        raise ValueError(f"未知的 agent_method: {args.agent_method}")
 
 
 if __name__ == "__main__":

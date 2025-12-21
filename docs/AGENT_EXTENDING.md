@@ -13,7 +13,7 @@ CLI (bizbench/run.py)
 └── 根据 agent_method 分派到 Agents/ 子包
 
 Agents/
-├── ace/  → 完整 ACE 流程：Generator → Reflector → Curator → Playbook
+├── ace/  → 完整 ACE 流程：Generator → Reflector → Curator
 └── cot/  → 轻量 Baseline：单 Generator + 统一 Prompt
 
 DataProcessor
@@ -28,9 +28,9 @@ Results
 | 步骤 | ACE | CoT baseline |
 | --- | --- | --- |
 | Prompt | 三角色不同 Prompt（详见 `Agents/ace/prompts/`） | 单 Prompt，输出 JSON（`Agents/cot/generator.py`） |
-| 反馈循环 | 生成 → 反思 → 策展（更新 playbook） | 无反馈，单次生成 |
+| 反馈循环 | 生成 → 反思 → 策展 | 无反馈，单次生成 |
 | 支持模式 | offline / online / eval_only | online / eval_only（可扩展） |
-| 结果 | `final_results.json`、`train_results.json`、Playbook | `test_results.json` + `run_config.json` |
+| 结果 | `final_results.json`、`train_results.json` 等 | `test_results.json` + `run_config.json` |
 
 ---
 
@@ -128,7 +128,7 @@ prompt_lines = [
     "You are a finance-domain reasoning assistant...",
     "Return JSON with keys reasoning / bullet_ids / final_answer",
     "- reasoning: ...",
-    "- bullet_ids: [] because no playbook",
+    "- bullet_ids: [] when no external knowledge source is referenced",
     "- final_answer: ...",
     "",
     "Question:",
@@ -219,13 +219,20 @@ nohup python -m "${BENCHMARK_MODULE}" \
    - `timed_llm_call()` 已内置重试与问题请求记录，可复用。
 4. **结果命名**：
    - 必须生成 `run_config.json`（含 `run_subdir`），`test_results.json`，必要时包含 `final_results.json`、`train_results.json` 等。
-   - playbook 相关文件只在需要时写入。
-5. **Prompt 约束**：若没有 playbook，需在 Prompt 中明确说明以避免模型引用不存在的内容（如 CoT 的 `bullet_ids` 永远为空）。
+5. **Prompt 约束**：无外部记忆/知识时，需在 Prompt 中明确说明，避免模型引用不存在的内容（如 CoT 的 `bullet_ids` 永远为空）。
 6. **目录结构**：任何新 Agent 都应遵循 `<task>/<agent>/<mode>/<timestamp>`，以便离线结果管理工具（如 `results/bizbench_run/...`）自动识别。
 
 ---
 
-## 8. 验证 Checklist
+## 8. 模式说明（offline / online / eval_only）
+
+- **offline**：一次性训练+评测流程。先用 `train` 数据完成全部训练/微调，训练结束后再用 `test` 数据做单次评测；测试集不参与训练。
+- **online**：窗口化的“先测后训”循环。将 `test` 样本按窗口切分（例如每 N 条或按时间分片）；对每个窗口先使用当前模型进行评测，随后立刻用该窗口及其标注做增量训练/微调；进入下一窗口时，模型需累积此前窗口的训练成果，保持时间顺序。
+- **eval_only**：纯评测模式，不做任何训练，直接用全部 `test` 数据评测。
+
+---
+
+## 9. 验证 Checklist
 
 1. **命令行运行**  
    ```bash
@@ -240,8 +247,8 @@ nohup python -m "${BENCHMARK_MODULE}" \
    - `results/bizbench_run/FinCode/your_agent/online/<timestamp>/` 是否存在。
    - `run_config.json` 中是否记录 `run_subdir` 和正确配置。
 3. **结果文件**  
-   - `test_results.json` / `final_results.json`（如适用）格式正确，可读。
-   - `detailed_llm_logs/` 等日志目录是否创建。
+- `test_results.json` / `final_results.json`（如适用）格式正确，可读。
+- `detailed_llm_logs/` 等日志目录是否创建。
 4. **日志输出**  
    - 控制台/日志文件中是否包含启动提示、样本数、准确率等关键信息。
 5. **Glue 脚本**  
@@ -253,9 +260,9 @@ nohup python -m "${BENCHMARK_MODULE}" \
 
 ---
 
-## 9. 示例参考
+## 10. 示例参考
 
-- **ACE**：`Agents/ace/ace.py`（多角色协作 + playbook 演化）；适合需要复杂记忆管理的 Agent。
+- **ACE**：`Agents/ace/ace.py`（多角色协作，含多阶段生成与反思）；适合需要复杂记忆管理的 Agent。
 - **CoT**：`Agents/cot/agent.py` + `generator.py`（单 Prompt Baseline）；适合作为最小实现模板。
 
 在这两者之间，你可以实现任意复杂度的方案，只要遵循本文档约定，便能快速集成到现有 CLI、结果存储与日志体系中。

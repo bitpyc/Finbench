@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "002C5D-E",
+  "entity_proper_name": "Vale SA",
+  "iso_country": "BR",
+  "primary_sic_name": "",
+  "company_id": 1491943,
+  "industry": "Latin America",
+  "top_segments": [
+    "Business and Public Services",
+    "Industrial and Materials"
+  ],
+  "cutoff_date": "2015-12-31",
+  "decision_year": 2015,
+  "self_profile": {
+    "factset_entity_id": "002C5D-E",
+    "company_id": 1491943,
+    "entity_proper_name": "Vale SA",
+    "iso_country": "BR",
+    "primary_sic_name": "",
+    "cutoff_date": "2015-12-31",
+    "industry": "Latin America",
+    "top_segments": [
+      "Business and Public Services",
+      "Industrial and Materials"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-02 13:41:05",
+    "total_suppliers": 139,
+    "historical_suppliers": 51,
+    "future_new_suppliers": 37,
+    "random_noise_suppliers": 51,
+    "positive_samples": 64,
+    "negative_samples": 75
+  }
+}

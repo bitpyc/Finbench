@@ -281,6 +281,7 @@ class DataProcessor:
     MULTIPLE_CHOICE = "multiple_choice"
     FORMULA_EVAL = "formula_eval"
     SPECIAL_FIN = "special_fin"
+    SUPPLIER_SELECTION = "supplier_selection"
 
     TASK_CATEGORY = {
         "FinCode": PROGRAM_SYNTHESIS,
@@ -293,49 +294,57 @@ class DataProcessor:
         "FormulaEval": FORMULA_EVAL,
         "finer": SPECIAL_FIN,
         "formula": SPECIAL_FIN,
+        "factset": SUPPLIER_SELECTION,
     }
 
     NUMERIC_TOLERANCE = 0.01  # 1%
     ABSOLUTE_EPS = 1e-6
     SPECIAL_FIN_INSTRUCTIONS = {
         "finer": (
-            "You are a financial sentiment and key-fact extraction assistant. "
-            "Read the following instruction and context, then output the requested values "
-            "exactly as they appear (comma-separated if multiple are required)."
+            "INSTRUCTION: YOU ARE A FINANCIAL SENTIMENT AND KEY-FACT EXTRACTION ASSISTANT. "
+            "READ THE FOLLOWING INSTRUCTION AND CONTEXT, THEN OUTPUT THE REQUESTED VALUES "
+            "EXACTLY AS THEY APPEAR (COMMA-SEPARATED IF MULTIPLE ARE REQUIRED)."
         ),
         "formula": (
-            "You are a financial calculation assistant. Solve the question carefully "
-            "and respond with a plain floating point number (round to the nearest hundredth "
-            "and expand any units, e.g., 5 million -> 5000000.0)."
+            "INSTRUCTION: YOU ARE A FINANCIAL CALCULATION ASSISTANT. SOLVE THE QUESTION CAREFULLY "
+            "AND RESPOND WITH A PLAIN FLOATING POINT NUMBER (ROUND TO THE NEAREST HUNDREDTH "
+            "AND EXPAND ANY UNITS, E.G., 5 MILLION -> 5000000.0)."
         ),
     }
 
     TASK_INSTRUCTIONS = {
         PROGRAM_SYNTHESIS: (
-            "You are a financial coding assistant. "
-            "Read the problem (and any context). "
-            "Respond with a Python program enclosed in ```python``` fences. "
-            "Ensure the final line of the program evaluates to the numeric answer. "
-            "After the code block, also provide the numeric result in the form [[value]]. "
-            "Do not include extra commentary."
+            "INSTRUCTION: YOU ARE A FINANCIAL CODING ASSISTANT. "
+            "READ THE PROBLEM (AND ANY CONTEXT). "
+            "RESPOND WITH A PYTHON PROGRAM ENCLOSED IN ```python``` FENCES. "
+            "ENSURE THE FINAL LINE OF THE PROGRAM EVALUATES TO THE NUMERIC ANSWER. "
+            "AFTER THE CODE BLOCK, ALSO PROVIDE THE NUMERIC RESULT IN THE FORM [[VALUE]]. "
+            "DO NOT INCLUDE EXTRA COMMENTARY."
         ),
         QUANTITY_EXTRACTION: (
-            "You are a financial information extraction assistant. "
-            "Given the question and context, extract the requested numeric quantity verbatim from the text. "
-            "Answer ONLY with [[extracted_span]] (no explanation or additional text)."
+            "INSTRUCTION: YOU ARE A FINANCIAL INFORMATION EXTRACTION ASSISTANT. "
+            "GIVEN THE QUESTION AND CONTEXT, EXTRACT THE REQUESTED NUMERIC QUANTITY VERBATIM FROM THE TEXT. "
+            "ANSWER ONLY WITH [[EXTRACTED_SPAN]] (NO EXPLANATION OR ADDITIONAL TEXT)."
         ),
         MULTIPLE_CHOICE: (
-            "You are a financial multiple-choice expert. "
-            "Choose the single best option (A, B, C, ...). "
-            "Answer ONLY with the option in the format [[A]], [[B]], etc."
+            "INSTRUCTION: YOU ARE A FINANCIAL MULTIPLE-CHOICE EXPERT. "
+            "CHOOSE THE SINGLE BEST OPTION (A, B, C, ...). "
+            "ANSWER ONLY WITH THE OPTION IN THE FORMAT [[A]], [[B]], ETC."
         ),
         FORMULA_EVAL: (
-            "You are a code completion assistant. "
-            "The function or method signature is already provided above. "
-            "Fill in ONLY the missing body lines (do not repeat the signature or class definition). "
-            "Return your completion inside a ```python``` block with proper indentation and no extra commentary."
+            "INSTRUCTION: YOU ARE A CODE COMPLETION ASSISTANT. "
+            "THE FUNCTION OR METHOD SIGNATURE IS ALREADY PROVIDED ABOVE. "
+            "FILL IN ONLY THE MISSING BODY LINES (DO NOT REPEAT THE SIGNATURE OR CLASS DEFINITION). "
+            "IF THE BODY IS A SINGLE RETURN, OUTPUT ONLY THAT RETURN STATEMENT. "
+            "RETURN YOUR COMPLETION INSIDE A ```python``` BLOCK WITH PROPER INDENTATION AND NO EXTRA COMMENTARY."
         ),
         SPECIAL_FIN: "",  # handled separately via SPECIAL_FIN_INSTRUCTIONS
+        SUPPLIER_SELECTION: (
+            "INSTRUCTION: YOU ARE A SUPPLIER SELECTION ASSISTANT. "
+            "GIVEN THE TARGET COMPANY PROFILE AND A CANDIDATE SUPPLIER PROFILE, "
+            "DECIDE WHETHER TO KEEP/SELECT THE SUPPLIER FOR THE DECISION YEAR. "
+            "ANSWER ONLY WITH [[1]] FOR SELECT OR [[0]] FOR NOT SELECT."
+        ),
     }
     FORMULA_NUM_TESTS = 4
     FORMULA_MAX_ATTEMPTS = 5
@@ -363,6 +372,22 @@ class DataProcessor:
             )
             processed.append(handler(sample))
         return processed
+
+    def _process_supplier_selection_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        question = self._prepend_instruction(self.category, sample.get("question", ""))
+        target = str(sample.get("answer", "")).strip()
+        return {
+            "context": sample.get("context", ""),
+            "question": question,
+            "target": target,
+            "others": {
+                "target_entity_id": sample.get("target_entity_id"),
+                "supplier_entity_id": sample.get("supplier_entity_id"),
+                "year": sample.get("year"),
+                "target_info": sample.get("target_info"),
+                "supplier_raw": sample.get("supplier_raw"),
+            },
+        }
 
     def _process_program_synthesis_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         context_parts: List[str] = []
@@ -502,6 +527,8 @@ class DataProcessor:
                 return self._finer_answer_is_correct(predicted, ground_truth)
             if self.task_name == "formula":
                 return self._formula_answer_is_correct(predicted, ground_truth)
+        if self.category == self.SUPPLIER_SELECTION:
+            return self._check_supplier_selection(predicted, ground_truth)
 
         return str(predicted).strip() == str(ground_truth).strip()
 
@@ -555,6 +582,15 @@ class DataProcessor:
         pred_label = self._parse_choice_label(predicted, options)
         return pred_label == gold_label
 
+    def _check_supplier_selection(self, predicted: str, ground_truth: Any) -> bool:
+        """
+        Binary decision: accept [[1]]/1/yes/select vs [[0]]/0/no/reject.
+        """
+        normalized_truth = self._normalize_basic(str(ground_truth))
+        truth_label = self._binary_label(normalized_truth)
+        pred_label = self._binary_label(self._normalize_basic(str(predicted)))
+        return truth_label is not None and pred_label is not None and truth_label == pred_label
+
     def _check_formula_eval(self, predicted: str, ground_truth: Any) -> bool:
         if isinstance(ground_truth, dict) and ground_truth.get("prompt") is not None:
             prompt_code = ground_truth.get("prompt", "")
@@ -564,8 +600,31 @@ class DataProcessor:
             if not target_info:
                 return self._normalize_basic(predicted) == self._normalize_basic(true_completion)
 
+            # 对于类似 DynamicCheatsheet 返回的 JSON/结构化输出，尝试先抽取其中的代码段
+            cleaned_predicted = predicted
+            try:
+                text = self._decode_prediction_text(str(predicted))
+                # 如果输出看起来像 JSON，并包含代码相关字段，则优先使用其中内容
+                if any(k in text for k in ('"solution"', "'solution'", '"completion"', "'completion'", '"response"', "'response'")):
+                    import re as _re
+
+                    m = _re.search(r"\{.*\}", text, flags=_re.DOTALL)
+                    if m:
+                        obj = json.loads(m.group(0))
+                        if isinstance(obj, dict):
+                            for key in ["solution", "completion", "response"]:
+                                if key in obj:
+                                    cleaned_predicted = str(obj[key])
+                                    break
+                            else:
+                                cleaned_predicted = text
+                else:
+                    cleaned_predicted = text
+            except Exception:
+                cleaned_predicted = predicted
+
             prediction_program = self._prepare_formula_prediction(
-                predicted,
+                cleaned_predicted,
                 prompt_code,
                 target_info=target_info,
             )
@@ -587,7 +646,7 @@ class DataProcessor:
 
                 return self._compare_formula_outputs(pred_outputs, ref_outputs)
 
-            return self._normalize_basic(predicted) == self._normalize_basic(true_completion)
+            return False
 
         return self._normalize_basic(predicted) == self._normalize_basic(ground_truth)
 
@@ -627,12 +686,84 @@ class DataProcessor:
         return correct == len(pred) and len(pred) > 0
 
     def _formula_answer_is_correct(self, predicted: str, ground_truth: str) -> bool:
+        """
+        更灵活地比较 formula 题目的数值答案。
+
+        支持以下形式的预测输出：
+        - 纯数字字符串，例如 "40.0"、"35,835.68"
+        - 含有解释文本但最后包含正确数字
+        - 含有 JSON/代码块并在字段如 "final_answer" 中给出数值
+        """
+        if predicted is None:
+            return False
+
+        # 先做基本清洗
+        pred_text = self._decode_prediction_text(str(predicted))
+        gt_text = (ground_truth or "").strip()
+
+        # 尝试解析标准数值形式的 ground truth
         try:
-            predicted_val = float(predicted.replace(",", ""))
-            ground_truth_val = float(ground_truth.replace(",", ""))
-            return predicted_val == ground_truth_val
+            gt_val = float(gt_text.replace(",", ""))
         except Exception:
-            return predicted.strip() == ground_truth.strip()
+            gt_val = None
+
+        # 1) 尝试直接把整个预测当作数字解析
+        try:
+            pred_val_direct = float(pred_text.replace(",", ""))
+            if gt_val is not None:
+                return pred_val_direct == gt_val
+        except Exception:
+            pass
+
+        # 2) 尝试从 JSON/代码块中解析 "final_answer" 字段
+        if '"final_answer"' in pred_text or "'final_answer'" in pred_text:
+            try:
+                import re as _re
+                m = _re.search(r"\{.*\}", pred_text, flags=_re.DOTALL)
+                if m:
+                    obj = json.loads(m.group(0))
+                    if isinstance(obj, dict) and "final_answer" in obj:
+                        fa = obj["final_answer"]
+                        # final_answer 可能本身就是数值
+                        if isinstance(fa, (int, float)):
+                            if gt_val is not None:
+                                return float(fa) == gt_val
+                        else:
+                            fa_str = str(fa)
+                            try:
+                                fa_val = float(fa_str.replace(",", ""))
+                                if gt_val is not None:
+                                    return fa_val == gt_val
+                            except Exception:
+                                # 回退到字符串比较
+                                if fa_str.strip() == gt_text:
+                                    return True
+            except Exception:
+                pass
+
+        # 3) 通用：用正则提取预测中的所有数字，优先使用最后一个
+        try:
+            import re as _re
+
+            numbers = _re.findall(
+                r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", pred_text.replace(",", "")
+            )
+            if numbers:
+                last_num = numbers[-1]
+                if gt_val is not None:
+                    try:
+                        pred_val = float(last_num)
+                        return pred_val == gt_val
+                    except Exception:
+                        pass
+                # ground_truth 也是字符串时，允许与最后一个数字直接比对
+                if last_num == gt_text or last_num == gt_text.replace(",", ""):
+                    return True
+        except Exception:
+            pass
+
+        # 4) 最后退回到原始的字符串比较
+        return pred_text.strip() == gt_text
 
     def _evaluate_finer_accuracy(self, predictions: List[str], targets: List[str]) -> float:
         if len(predictions) != len(targets):
@@ -1048,6 +1179,29 @@ class DataProcessor:
         if self._is_float(raw_value):
             return float(raw_value)
 
+        return None
+
+    def _binary_label(self, text: str) -> Optional[int]:
+        if text is None:
+            return None
+        t = text.strip()
+        if t.startswith("[[") and t.endswith("]]"):
+            t = t[2:-2].strip()
+        t = t.lower()
+        if t in {"1", "yes", "select", "true"}:
+            return 1
+        if t in {"0", "no", "reject", "false"}:
+            return 0
+        # try numeric fallback
+        if self._is_float(t):
+            try:
+                val = float(t)
+                if abs(val - 1.0) < 1e-6:
+                    return 1
+                if abs(val - 0.0) < 1e-6:
+                    return 0
+            except Exception:
+                return None
         return None
 
     def _parse_choice_label(self, predicted: str, options: List[str]) -> str:

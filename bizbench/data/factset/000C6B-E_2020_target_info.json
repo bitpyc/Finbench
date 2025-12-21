@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "000C6B-E",
+  "entity_proper_name": "Anixter International, Inc.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 739,
+  "industry": "Industrial and Materials",
+  "top_segments": [
+    "Industrial and Materials",
+    "Technology"
+  ],
+  "cutoff_date": "2020-12-31",
+  "decision_year": 2020,
+  "self_profile": {
+    "factset_entity_id": "000C6B-E",
+    "company_id": 739,
+    "entity_proper_name": "Anixter International, Inc.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2020-12-31",
+    "industry": "Industrial and Materials",
+    "top_segments": [
+      "Industrial and Materials",
+      "Technology"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 02:53:06",
+    "total_suppliers": 47,
+    "historical_suppliers": 20,
+    "future_new_suppliers": 7,
+    "random_noise_suppliers": 20,
+    "positive_samples": 17,
+    "negative_samples": 30
+  }
+}

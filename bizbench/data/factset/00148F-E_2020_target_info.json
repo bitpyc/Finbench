@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "00148F-E",
+  "entity_proper_name": "Henry Schein, Inc.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 4954,
+  "industry": "Healthcare",
+  "top_segments": [
+    "Healthcare",
+    "Technology"
+  ],
+  "cutoff_date": "2020-12-31",
+  "decision_year": 2020,
+  "self_profile": {
+    "factset_entity_id": "00148F-E",
+    "company_id": 4954,
+    "entity_proper_name": "Henry Schein, Inc.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2020-12-31",
+    "industry": "Healthcare",
+    "top_segments": [
+      "Healthcare",
+      "Technology"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 03:29:33",
+    "total_suppliers": 62,
+    "historical_suppliers": 25,
+    "future_new_suppliers": 12,
+    "random_noise_suppliers": 25,
+    "positive_samples": 29,
+    "negative_samples": 33
+  }
+}

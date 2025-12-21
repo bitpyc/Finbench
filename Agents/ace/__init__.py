@@ -45,7 +45,7 @@ Usage:
     )
 """
 
-from .ace import ACE
+from .agent import ACE
 from .core import Generator, Reflector, Curator, BulletpointAnalyzer
 
 __all__ = ['ACE', 'Generator', 'Reflector', 'Curator', 'BulletpointAnalyzer']

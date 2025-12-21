@@ -1,0 +1,34 @@
+{
+  "target_entity_id": "000FFC-E",
+  "entity_proper_name": "CSX Corp.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 2880,
+  "industry": "Rail Transportation",
+  "top_segments": [
+    "Business and Public Services"
+  ],
+  "cutoff_date": "2016-12-31",
+  "decision_year": 2016,
+  "self_profile": {
+    "factset_entity_id": "000FFC-E",
+    "company_id": 2880,
+    "entity_proper_name": "CSX Corp.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2016-12-31",
+    "industry": "Rail Transportation",
+    "top_segments": [
+      "Business and Public Services"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 04:23:37",
+    "total_suppliers": 25,
+    "historical_suppliers": 8,
+    "future_new_suppliers": 9,
+    "random_noise_suppliers": 8,
+    "positive_samples": 12,
+    "negative_samples": 13
+  }
+}

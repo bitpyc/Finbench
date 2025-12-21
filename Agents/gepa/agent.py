@@ -1,0 +1,367 @@
+from __future__ import annotations
+
+import json
+import os
+import random
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import replace
+
+from utils.tools import extract_answer, initialize_clients
+from utils.llm import timed_llm_call
+
+from .config import GepaConfig
+from .core import GepaResult, _build_query, run_gepa
+from .prompts import SEED_PROMPT
+
+
+class GEPAAgent:
+    """GEPA prompt 演化 agent。支持 online / eval_only / offline。"""
+
+    SUPPORTED_MODES = {"online", "eval_only", "offline"}
+
+    def __init__(
+        self,
+        api_provider: str,
+        generator_model: str,
+        reflector_model: str,
+        max_tokens: int,
+        agent_method: str = "gepa",
+        gepa_config: Optional[GepaConfig] = None,
+    ):
+        self.agent_method = agent_method
+        self.api_provider = api_provider
+        self.generator_model = generator_model
+        self.reflector_model = reflector_model
+        self.max_tokens = max_tokens
+        self.cfg = gepa_config or GepaConfig()
+        if self.cfg.max_tokens != max_tokens:
+            # 保持与全局 max_tokens 一致
+            self.cfg.max_tokens = max_tokens
+
+        # 复用全局客户端初始化
+        self.generator_client, self.reflector_client, _ = initialize_clients(api_provider)
+
+    def _split_eval_only(
+        self, samples: List[Dict[str, Any]], ratio: float, mini_batch_size: int
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """将测试样本拆为 Dfeedback (ratio) 与 Dpareto (其余)。"""
+        if not samples:
+            return [], []
+        shuffled = list(samples)
+        random.shuffle(shuffled)
+        n_feedback = max(int(len(shuffled) * ratio), mini_batch_size)
+        n_feedback = min(n_feedback, len(shuffled) - 1) if len(shuffled) > 1 else len(shuffled)
+        Dfeedback = shuffled[:n_feedback]
+        Dpareto = shuffled[n_feedback:] if n_feedback < len(shuffled) else shuffled
+        return Dpareto, Dfeedback
+
+    def _evaluate_with_prompt(
+        self,
+        prompt: str,
+        samples: List[Dict[str, Any]],
+        data_processor,
+        log_dir: str,
+        max_workers: int,
+        use_json_mode: bool,
+        task_name: str = "",
+    ) -> Dict[str, Any]:
+        """使用给定 prompt 评测完整样本集，返回 accuracy 与错误列表。"""
+        def _eval_single(idx: int, sample: Dict[str, Any]) -> Dict[str, Any]:
+            contents = _build_query(sample, prompt)
+            resp, _ = timed_llm_call(
+                self.generator_client,
+                api_provider=self.api_provider,
+                model=self.generator_model,
+                prompt=contents,
+                role="generator",
+                call_id=f"gepa_final_{idx}",
+                max_tokens=self.max_tokens,
+                use_json_mode=use_json_mode,
+                temperature=self.cfg.target_temperature,
+            )
+            # 尽量解析最终答案；若解析失败则回退原始响应，避免统一变成 "No final answer found"
+            if hasattr(data_processor, "extract_answer_from_response"):
+                final_answer = data_processor.extract_answer_from_response(resp)
+            else:
+                final_answer = extract_answer(resp)
+                if final_answer == "No final answer found":
+                    final_answer = resp
+            is_correct = data_processor.answer_is_correct(final_answer, sample.get("target", ""))
+            return {
+                "index": idx,
+                "final_answer": final_answer,
+                "target": sample.get("target", ""),
+                "is_correct": is_correct,
+            }
+
+        results: List[Dict[str, Any]] = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_eval_single, i, s): i for i, s in enumerate(samples)}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+        results.sort(key=lambda x: x["index"])
+
+        accuracy = (
+            sum(1 for r in results if r["is_correct"]) / len(results) if results else 0.0
+        )
+        errors = [
+            {"index": r["index"], "prediction": r["final_answer"], "ground_truth": r["target"]}
+            for r in results
+            if not r["is_correct"]
+        ]
+        return {"accuracy": accuracy, "total": len(results), "correct": len(results) - len(errors), "errors": errors}
+
+    def run(
+        self,
+        mode: str,
+        test_samples: Optional[List[Dict[str, Any]]],
+        data_processor,
+        config: Dict[str, Any],
+        train_samples: Optional[List[Dict[str, Any]]] = None,
+        val_samples: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(f"{self.agent_method.upper()} 仅支持 {self.SUPPORTED_MODES}，收到 {mode}")
+        if mode in {"online", "eval_only"} and not test_samples:
+            raise ValueError(f"{self.agent_method.upper()} 需要 test_samples")
+        if mode == "offline" and (train_samples is None or val_samples is None):
+            raise ValueError(f"{self.agent_method.upper()} offline 需要 train_samples 与 val_samples")
+
+        save_dir = config.get("save_dir")
+        if not save_dir:
+            raise ValueError("配置缺少 save_dir")
+
+        task_name = config.get("task_name", "unknown_task")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_subdir = os.path.join(task_name, self.agent_method, mode, timestamp)
+        resolved_save_path = os.path.join(save_dir, run_subdir)
+        os.makedirs(resolved_save_path, exist_ok=True)
+        log_dir = os.path.join(resolved_save_path, "detailed_llm_logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # 构造 Dpareto / Dfeedback / 窗口逻辑
+        if mode == "online":
+            # 窗口化：按 ACE online_eval_frequency 切分窗口，先测后训，跨窗口继承 best prompt
+            window_size = config.get("online_eval_frequency", 100)
+            num_windows = (len(test_samples) + window_size - 1) // window_size if window_size > 0 else 1
+            best_prompt = self.cfg.seed_prompt or SEED_PROMPT
+            overall_correct, overall_total = 0, 0
+            window_records: List[Dict[str, Any]] = []
+            trace_entries: List[Dict[str, Any]] = []
+
+            for w in range(num_windows):
+                start = w * window_size
+                end = min((w + 1) * window_size, len(test_samples))
+                window_samples = test_samples[start:end]
+
+                # Step 1: 先评测
+                eval_res = self._evaluate_with_prompt(
+                    best_prompt,
+                    window_samples,
+                    data_processor,
+                    log_dir=log_dir,
+                    max_workers=self.cfg.max_workers,
+                    use_json_mode=self.cfg.use_json_mode,
+                task_name=config.get("task_name", ""),
+                )
+                overall_correct += eval_res["correct"]
+                overall_total += eval_res["total"]
+                window_records.append(
+                    {
+                        "window": w + 1,
+                        "start": start,
+                        "end": end,
+                        "accuracy": eval_res["accuracy"],
+                        "correct": eval_res["correct"],
+                        "total": eval_res["total"],
+                        "errors": eval_res["errors"],
+                    }
+                )
+
+                # Step 2: 在窗口样本上优化 GEPA（反馈+评分同源），每窗口单独预算
+                window_budget = self.cfg.window_budget or self.cfg.budget
+                # 为避免初始开销过大，窗口优化仅用上一窗口 best 作为单一初始候选
+                win_cfg = replace(
+                    self.cfg,
+                    budget=window_budget,
+                    num_initial=1,
+                )
+                gepa_result: GepaResult = run_gepa(
+                    generator_client=self.generator_client,
+                    reflection_client=self.reflector_client,
+                    api_provider=self.api_provider,
+                    target_model=self.generator_model,
+                    reflection_model=self.reflector_model,
+                    cfg=win_cfg,
+                    Dpareto=window_samples,
+                    Dfeedback=window_samples,
+                    initial_candidates=[best_prompt],
+                )
+                for t in gepa_result.trace:
+                    t["window"] = w + 1
+                trace_entries.extend(gepa_result.trace)
+                best_prompt = gepa_result.best_prompt
+
+            accuracy = overall_correct / overall_total if overall_total else 0.0
+            final_results = {
+                "accuracy": accuracy,
+                "total": overall_total,
+                "correct": overall_correct,
+                "window_results": window_records,
+            }
+
+            trace_path = os.path.join(resolved_save_path, "gepa_trace.jsonl")
+            with open(trace_path, "w", encoding="utf-8") as f:
+                for item in trace_entries:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+            with open(os.path.join(resolved_save_path, "test_results.json"), "w", encoding="utf-8") as f:
+                json.dump({"test_results": final_results}, f, indent=2, ensure_ascii=False)
+
+            cfg_payload = {
+                "run_subdir": run_subdir,
+                "resolved_save_path": resolved_save_path,
+                "gepa_config": self.cfg.__dict__,
+                "best_prompt": best_prompt,
+                "gepa_data_usage": "online windowed: each window test then optimize on same window",
+            }
+            cfg_payload.update(config)
+            with open(os.path.join(resolved_save_path, "run_config.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg_payload, f, indent=2, ensure_ascii=False)
+
+            print(f"\n{'='*60}")
+            print(f"{self.agent_method.upper()} - RUN COMPLETE")
+            print(f"{'='*60}")
+            print(f"Accuracy: {accuracy:.3f}")
+            print(f"Results saved to: {resolved_save_path}")
+            print(f"{'='*60}\n")
+            return final_results
+        elif mode == "offline":
+            # baseline 测试（可选）
+            baseline_results = None
+            if test_samples:
+                baseline_results = self._evaluate_with_prompt(
+                    prompt=self.cfg.seed_prompt or SEED_PROMPT,
+                    samples=test_samples,
+                    data_processor=data_processor,
+                    log_dir=log_dir,
+                    max_workers=self.cfg.max_workers,
+                    use_json_mode=self.cfg.use_json_mode,
+                    task_name=config.get("task_name", ""),
+                )
+
+            # 训练/优化：Dpareto=val，Dfeedback=train
+            gepa_result: GepaResult = run_gepa(
+                generator_client=self.generator_client,
+                reflection_client=self.reflector_client,
+                api_provider=self.api_provider,
+                target_model=self.generator_model,
+                reflection_model=self.reflector_model,
+                cfg=self.cfg,
+                Dpareto=val_samples or [],
+                Dfeedback=train_samples or [],
+            )
+
+            trace_path = os.path.join(resolved_save_path, "gepa_trace.jsonl")
+            with open(trace_path, "w", encoding="utf-8") as f:
+                for item in gepa_result.trace:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+            eval_set = test_samples if test_samples else val_samples
+            final_results = self._evaluate_with_prompt(
+                gepa_result.best_prompt,
+                eval_set or [],
+                data_processor,
+                log_dir=log_dir,
+                max_workers=self.cfg.max_workers,
+                use_json_mode=self.cfg.use_json_mode,
+                task_name=config.get("task_name", ""),
+            )
+
+            with open(os.path.join(resolved_save_path, "test_results.json"), "w", encoding="utf-8") as f:
+                payload = {"final_test_results": final_results}
+                if baseline_results:
+                    payload["baseline_results"] = baseline_results
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+
+            cfg_payload = {
+                "run_subdir": run_subdir,
+                "resolved_save_path": resolved_save_path,
+                "gepa_config": self.cfg.__dict__,
+                "best_prompt": gepa_result.best_prompt,
+                "best_candidate": gepa_result.best_candidate,
+                "gepa_data_usage": "offline: Dfeedback=train, Dpareto=val; final eval on test if provided else val",
+            }
+            cfg_payload.update(config)
+            with open(os.path.join(resolved_save_path, "run_config.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg_payload, f, indent=2, ensure_ascii=False)
+
+            print(f"\n{'='*60}")
+            print(f"{self.agent_method.upper()} - RUN COMPLETE")
+            print(f"{'='*60}")
+            print(f"Accuracy: {final_results.get('accuracy', 0.0):.3f}")
+            print(f"Results saved to: {resolved_save_path}")
+            print(f"{'='*60}\n")
+            return final_results
+        else:
+            Dpareto, Dfeedback = self._split_eval_only(
+                test_samples, self.cfg.feedback_ratio, self.cfg.mini_batch_size
+            )
+
+            # 运行 GEPA
+            gepa_result: GepaResult = run_gepa(
+                generator_client=self.generator_client,
+                reflection_client=self.reflector_client,
+                api_provider=self.api_provider,
+                target_model=self.generator_model,
+                reflection_model=self.reflector_model,
+                cfg=self.cfg,
+                Dpareto=Dpareto,
+                Dfeedback=Dfeedback,
+            )
+
+            # 记录 trace
+            trace_path = os.path.join(resolved_save_path, "gepa_trace.jsonl")
+            with open(trace_path, "w", encoding="utf-8") as f:
+                for item in gepa_result.trace:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+            # 使用 best prompt 完整评测
+            final_results = self._evaluate_with_prompt(
+                gepa_result.best_prompt,
+                test_samples,
+                data_processor,
+                log_dir=log_dir,
+                max_workers=self.cfg.max_workers,
+                use_json_mode=self.cfg.use_json_mode,
+                task_name=config.get("task_name", ""),
+            )
+
+            with open(os.path.join(resolved_save_path, "test_results.json"), "w", encoding="utf-8") as f:
+                json.dump({"test_results": final_results}, f, indent=2, ensure_ascii=False)
+
+            cfg_payload = {
+                "run_subdir": run_subdir,
+                "resolved_save_path": resolved_save_path,
+                "gepa_config": self.cfg.__dict__,
+                "best_prompt": gepa_result.best_prompt,
+                "best_candidate": gepa_result.best_candidate,
+                "gepa_data_usage": "eval_only splits test into feedback/pareto; online windowed; offline uses train/val",
+            }
+            cfg_payload.update(config)
+            with open(os.path.join(resolved_save_path, "run_config.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg_payload, f, indent=2, ensure_ascii=False)
+
+            print(f"\n{'='*60}")
+            print(f"{self.agent_method.upper()} - RUN COMPLETE")
+            print(f"{'='*60}")
+            print(f"Accuracy: {final_results.get('accuracy', 0.0):.3f}")
+            print(f"Results saved to: {resolved_save_path}")
+            print(f"{'='*60}\n")
+
+            return final_results
+
+

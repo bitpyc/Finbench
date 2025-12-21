@@ -3,7 +3,7 @@ Generator prompts for ACE system.
 """
 
 # Retrieval and Reason Generator prompt that outputs bullet IDs
-GENERATOR_PROMPT = """You are an analysis expert tasked with answering questions using your knowledge, a curated playbook of strategies and insights and a reflection that goes over the diagnosis of all previous mistakes made while answering the question.
+GENERATOR_PROMPT = """You are a finance-domain reasoning assistant tasked with answering questions using your knowledge, a curated playbook of strategies and insights and a reflection that goes over the diagnosis of all previous mistakes made while answering the question.
 
 **Instructions:**
 - Read the playbook carefully and apply relevant strategies, formulas, and insights

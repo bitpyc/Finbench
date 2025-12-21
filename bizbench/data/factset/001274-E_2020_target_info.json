@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "001274-E",
+  "entity_proper_name": "PG&E Corp.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 8013,
+  "industry": "United States",
+  "top_segments": [
+    "Business and Public Services",
+    "Energy"
+  ],
+  "cutoff_date": "2020-12-31",
+  "decision_year": 2020,
+  "self_profile": {
+    "factset_entity_id": "001274-E",
+    "company_id": 8013,
+    "entity_proper_name": "PG&E Corp.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2020-12-31",
+    "industry": "United States",
+    "top_segments": [
+      "Business and Public Services",
+      "Energy"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 05:34:29",
+    "total_suppliers": 104,
+    "historical_suppliers": 46,
+    "future_new_suppliers": 12,
+    "random_noise_suppliers": 46,
+    "positive_samples": 42,
+    "negative_samples": 62
+  }
+}

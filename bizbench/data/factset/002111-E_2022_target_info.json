@@ -1,0 +1,38 @@
+{
+  "target_entity_id": "002111-E",
+  "entity_proper_name": "Telecom Italia SpA",
+  "iso_country": "IT",
+  "primary_sic_name": "",
+  "company_id": 10018,
+  "industry": "Europe",
+  "top_segments": [
+    "Business and Public Services",
+    "Technology",
+    "Consumer"
+  ],
+  "cutoff_date": "2022-12-31",
+  "decision_year": 2022,
+  "self_profile": {
+    "factset_entity_id": "002111-E",
+    "company_id": 10018,
+    "entity_proper_name": "Telecom Italia SpA",
+    "iso_country": "IT",
+    "primary_sic_name": "",
+    "cutoff_date": "2022-12-31",
+    "industry": "Europe",
+    "top_segments": [
+      "Business and Public Services",
+      "Technology",
+      "Consumer"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 07:01:12",
+    "total_suppliers": 140,
+    "historical_suppliers": 60,
+    "future_new_suppliers": 20,
+    "random_noise_suppliers": 60,
+    "positive_samples": 58,
+    "negative_samples": 82
+  }
+}

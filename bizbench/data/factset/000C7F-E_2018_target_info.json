@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "000C7F-E",
+  "entity_proper_name": "Apple, Inc.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 777,
+  "industry": "Computer Hardware",
+  "top_segments": [
+    "Technology",
+    "Consumer"
+  ],
+  "cutoff_date": "2018-12-31",
+  "decision_year": 2018,
+  "self_profile": {
+    "factset_entity_id": "000C7F-E",
+    "company_id": 777,
+    "entity_proper_name": "Apple, Inc.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2018-12-31",
+    "industry": "Computer Hardware",
+    "top_segments": [
+      "Technology",
+      "Consumer"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-02 04:52:36",
+    "total_suppliers": 614,
+    "historical_suppliers": 234,
+    "future_new_suppliers": 146,
+    "random_noise_suppliers": 234,
+    "positive_samples": 288,
+    "negative_samples": 326
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "target_entity_id": "000C35-E",
+  "entity_proper_name": "Amgen, Inc.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 660,
+  "industry": "Vascular (Migraine)",
+  "top_segments": [
+    "Healthcare"
+  ],
+  "cutoff_date": "2022-12-31",
+  "decision_year": 2022,
+  "self_profile": {
+    "factset_entity_id": "000C35-E",
+    "company_id": 660,
+    "entity_proper_name": "Amgen, Inc.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2022-12-31",
+    "industry": "Vascular (Migraine)",
+    "top_segments": [
+      "Healthcare"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 02:25:10",
+    "total_suppliers": 151,
+    "historical_suppliers": 60,
+    "future_new_suppliers": 31,
+    "random_noise_suppliers": 60,
+    "positive_samples": 76,
+    "negative_samples": 75
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "target_entity_id": "003B1C-E",
+  "entity_proper_name": "Bunge Ltd.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 1399945,
+  "industry": "Consumer Products and Services",
+  "top_segments": [
+    "Consumer",
+    "Industrial and Materials",
+    "Unclassifiable"
+  ],
+  "cutoff_date": "2018-12-31",
+  "decision_year": 2018,
+  "self_profile": {
+    "factset_entity_id": "003B1C-E",
+    "company_id": 1399945,
+    "entity_proper_name": "Bunge Ltd.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2018-12-31",
+    "industry": "Consumer Products and Services",
+    "top_segments": [
+      "Consumer",
+      "Industrial and Materials",
+      "Unclassifiable"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 00:53:13",
+    "total_suppliers": 70,
+    "historical_suppliers": 32,
+    "future_new_suppliers": 6,
+    "random_noise_suppliers": 32,
+    "positive_samples": 26,
+    "negative_samples": 44
+  }
+}

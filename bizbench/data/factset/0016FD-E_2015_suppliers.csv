@@ -1,0 +1,29 @@
+factset_entity_id,entity_proper_name,iso_country,primary_sic_name,company_id,industry,top_segments,is_single_source,FF_SALES,FF_NET_MGN,FF_DEBT_EQ,FF_ROIC,FF_CURR_RATIO,CURRENCY,financial_date,revenue_percent,relationship_start,relationship_source,source_label,ground_truth_label
+002N6G-E,Sify Technologies Ltd.,IN,,228522.0,Telecommunications Services,"['Business and Public Services', 'Technology', 'Consumer']",False,3877.0,2.94041784885221,,,,INR,2015-12-31 00:00:00,,2015-07-30 00:00:00,factset_revere_relationship,historical,0
+05HWP7-E,Stockland,AU,,22246078.0,Real Estate Investment Trusts (REITs),['Finance'],False,,,,,,,,,2014-11-04 00:00:00,factset_revere_relationship,historical,1
+002D7C-E,Informatica LLC,US,,216116.0,IT Infrastructure,['Technology'],False,261.866,7.21093994638479,,,1.75974006793679,USD,2015-06-30 00:00:00,,2015-03-17 00:00:00,factset_revere_relationship,future_new,1
+05J1CC-E,Chime Communications Ltd.,GB,,1622977.0,Business Services,"['Business and Public Services', 'Consumer']",False,,,,,,,,,2015-06-04 00:00:00,factset_revere_relationship,future_new,1
+004B4C-E,Tableau Software LLC,US,,21439324.0,Primary Metal Industries,[],False,202.75,-20.380271270037,0.0,-11.9065315932063,3.46564759483641,USD,2015-12-31 00:00:00,,2014-03-17 00:00:00,factset_revere_relationship,historical,0
+003K82-E,Silicom Ltd.,IL,,249358.0,Network Adapters/Network Interface Cards (NICs),['Technology'],False,27.441,16.1109289020079,0.0,15.4715638257107,3.99883920460281,USD,2015-12-31 00:00:00,,2014-04-25 00:00:00,factset_revere_relationship,historical,1
+06VDQ2-E,"Marketo, Inc.",US,,28460910.0,Primary Metal Industries,[],False,58.267,-29.4351862975612,2.84778523489933,-68.277054127354,1.34782854375202,USD,2015-12-31 00:00:00,,2013-05-22 00:00:00,factset_revere_relationship,historical,1
+00791K-E,"Aimia, Inc.",CA,,272266.0,Additives,['Business and Public Services'],False,734.3,-3.54078714421898,130.846977966444,0.0078112794875801,0.498746306080416,CAD,2015-12-31 00:00:00,,2015-04-16 00:00:00,factset_revere_relationship,historical,0
+0726TN-E,ATA Creativity Global,CN,,1890675.0,Consumer Products and Services,"['Consumer', 'Technology']",False,,,,,,,,,2012-06-15 00:00:00,factset_revere_relationship,historical,1
+076WRN-E,"New Relic, Inc.",US,,6071936.0,Software,['Technology'],False,47.744,-38.4446213136729,0.0,-29.6169430048167,2.91861714119004,USD,2015-12-31 00:00:00,,2014-12-15 00:00:00,factset_revere_relationship,historical,1
+064TYD-E,"Five9, Inc.",US,,1713424.0,Technology,['Technology'],False,36.033,-9.76327255571282,177.385844748858,-39.8528538487048,1.46806669002329,USD,2015-12-31 00:00:00,,2014-04-04 00:00:00,factset_revere_relationship,historical,1
+00G6ND-E,Code Rebel Corp.,US,,64117445.0,Network,['Technology'],False,0.195064,-1364.48037567157,0.0,,4.81789604688678,USD,2015-12-31 00:00:00,,,,future_new,1
+07DFQQ-E,RPX Corp.,US,,21804533.0,"Stone, Clay, Glass, And Concrete Products",[],False,72.831,7.5888014719007,0.461393396440126,7.87240245865301,2.72626030315192,USD,2015-12-31 00:00:00,,,,historical,1
+063CBM-E,"Brightcove, Inc.",US,,1800624.0,Design/Engineering,['Technology'],False,35.136,0.489526411657559,1.08786075382351,-9.5407116514997,1.14074342934005,USD,2015-12-31 00:00:00,,2015-04-15 00:00:00,factset_revere_relationship,historical,1
+002QWZ-E,"Equinix, Inc.",US,,232535.0,Hosting Services,"['Technology', 'Business and Public Services', 'Finance']",False,724.067,1.48204516985307,237.526526324531,2.47418741072982,,USD,2015-12-31 00:00:00,,2014-03-25 00:00:00,factset_revere_relationship,historical,0
+00208X-E,NVIDIA Corp.,US,,20991.0,Electronic Components,['Technology'],False,21723.5811115385,18.8505747126437,31.7357222844345,10.7566345740623,6.8233918128655,MXN,2015-10-31 00:00:00,,2015-05-05 00:00:00,factset_revere_relationship,historical,0
+06132B-E,Swire Properties Ltd.,HK,,194515528.0,Real Estate,"['Finance', 'Consumer']",False,,,,,,,,,,,future_new,1
+0B0W18-E,"Fujian Rongji Software Co., Ltd.",CN,,194518114.0,Software,['Technology'],False,245.59659414,-3.23194455028773,9.52160279803646,1.16267650034404,2.97099587236538,CNY,2015-12-31 00:00:00,,,,future_new,1
+071VPF-E,Prestige Estates Projects Ltd.,IN,,194527275.0,Real Estate,"['Finance', 'Consumer']",False,10002.3,6.35853753636664,,,,INR,2015-12-31 00:00:00,,2015-10-15 00:00:00,factset_revere_relationship,future_new,1
+004GKQ-E,Intercede Group Plc,GB,,1779826.0,Software,['Technology'],False,,,,,,,,,,,future_new,1
+0766B4-E,Land & Buildings Investment Management LLC,US,,6032382.0,Communications,[],False,,,,,,,,,,,random_noise,0
+005YPB-E,"TechTarget, Inc.",US,,1630368.0,Media,"['Consumer', 'Business and Public Services']",False,29.404,6.69636784111005,0.0,4.55030441954491,4.11103718980773,USD,2015-12-31 00:00:00,,2008-06-04 00:00:00,factset_revere_relationship,future_new,1
+00D4Q0-E,"Interactive Intelligence Group, Inc.",US,,226530.0,Technology,['Technology'],False,107.687,-3.2798759367426,64.1319350105961,-9.23343105278966,1.92286068317582,USD,2015-12-31 00:00:00,,2015-03-30 00:00:00,factset_revere_relationship,future_new,1
+0DK9GD-E,Atlassian Corp. Plc,AU,,9692306.0,Software Development,['Technology'],False,109.706000000948,4.6168851293457,0.0,,3.74055832669657,USD,2015-12-31 00:00:00,,,,future_new,1
+005JJ1-E,"Cipher Pharmaceuticals, Inc.",CA,,271597.0,Biopharmaceuticals,['Healthcare'],False,12.9713208969455,21.0006176652255,63.7300256188142,3.21711113504056,2.63380129589633,CAD,2015-12-31 00:00:00,,,,random_noise,0
+0GR1JN-E,Tree Holdings Ltd.,HK,,102462523.0,Consumer,[],False,,,,,,,,,,,random_noise,0
+072HJD-E,Advanced Technology Co. KSCP,KW,,21997033.0,Medical Equipment Distributors,['Healthcare'],False,30.805265,6.9519577254083,125.640690039852,9.14820379047295,1.53188274054313,KWD,2015-12-31 00:00:00,,,,random_noise,0
+0TTV2T-E,Fitell Corp.,AU,,201393420.0,Consumer,[],False,,,,,,,,,,,random_noise,0

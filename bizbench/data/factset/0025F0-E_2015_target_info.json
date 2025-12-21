@@ -1,0 +1,36 @@
+{
+  "target_entity_id": "0025F0-E",
+  "entity_proper_name": "Mercedes-Benz Group AG",
+  "iso_country": "DE",
+  "primary_sic_name": "",
+  "company_id": 19337,
+  "industry": "Commercial Transportation Equipment",
+  "top_segments": [
+    "Industrial and Materials",
+    "Finance"
+  ],
+  "cutoff_date": "2015-12-31",
+  "decision_year": 2015,
+  "self_profile": {
+    "factset_entity_id": "0025F0-E",
+    "company_id": 19337,
+    "entity_proper_name": "Mercedes-Benz Group AG",
+    "iso_country": "DE",
+    "primary_sic_name": "",
+    "cutoff_date": "2015-12-31",
+    "industry": "Commercial Transportation Equipment",
+    "top_segments": [
+      "Industrial and Materials",
+      "Finance"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-02 16:34:28",
+    "total_suppliers": 737,
+    "historical_suppliers": 256,
+    "future_new_suppliers": 225,
+    "random_noise_suppliers": 256,
+    "positive_samples": 386,
+    "negative_samples": 351
+  }
+}

@@ -30,7 +30,6 @@ class ChainOfThoughtGenerator:
             "Follow the answer-format instructions exactly as they appear inside the question text.",
             "Return a JSON object with the keys `reasoning`, `bullet_ids`, and `final_answer`.",
             "- `reasoning`: include the full chain of thought, calculations, and intermediate steps.",
-            "- `bullet_ids`: always respond with an empty list [] because no curated playbook is provided.",
             "- `final_answer`: restate the answer exactly as required by the question instructions.",
             "",
             "Question (includes any task-specific instructions):",

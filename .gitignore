@@ -1,3 +1,7 @@
-benchmarks-pipeline-main/
+raw_repo/
 logs/
 results/
+insight.md
+current_todo.md
+.env
+*.pyc

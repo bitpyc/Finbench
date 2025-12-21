@@ -9,11 +9,13 @@ This file contains the LLM class for the project.
 import time
 import random
 from datetime import datetime
+from typing import List, Dict, Optional
 import openai
 from utils.logger import log_llm_call, log_problematic_request
 
 def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_tokens=4096, log_dir=None,
-                   sleep_seconds=15, retries_on_timeout=1000, attempt=1, use_json_mode=False):
+                   sleep_seconds=15, retries_on_timeout=1000, attempt=1, use_json_mode=False,
+                   temperature: float = 0.0, messages: Optional[List[Dict[str, str]]] = None):
     """
     Make a timed LLM call with error handling and retry logic.
     
@@ -66,8 +68,8 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
 
             api_params = {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
+                "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
+                "temperature": temperature,
                 max_tokens_key: max_tokens
             }
             

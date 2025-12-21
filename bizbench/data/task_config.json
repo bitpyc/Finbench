@@ -6,20 +6,20 @@
     },
     "CodeFinQA": {
         "train_data": "./bizbench/data/codefinqa_train.jsonl",
-        "val_data": "./bizbench/data/codefinqa_train.jsonl",
+        "val_data": "./bizbench/data/codefinqa_val.jsonl",
         "test_data": "./bizbench/data/codefinqa_test.jsonl"
     },
     "CodeTAT-QA": {
         "train_data": "./bizbench/data/codetat_qa_train.jsonl",
-        "val_data": "./bizbench/data/codetat_qa_train.jsonl",
+        "val_data": "./bizbench/data/codetat_qa_val.jsonl",
         "test_data": "./bizbench/data/codetat_qa_test.jsonl"
     },
     "SEC-NUM": {
         "train_data": "./bizbench/data/sec_num_train.jsonl",
-        "val_data": "./bizbench/data/sec_num_train.jsonl",
+        "val_data": "./bizbench/data/sec_num_val.jsonl",
         "test_data": "./bizbench/data/sec_num_test.jsonl"
     },
-    "TAT-QA": {
+    "TAT-QA": { 
         "train_data": "./bizbench/data/tat_qa_test.jsonl",
         "val_data": "./bizbench/data/tat_qa_test.jsonl",
         "test_data": "./bizbench/data/tat_qa_test.jsonl"
@@ -30,8 +30,8 @@
         "test_data": "./bizbench/data/convfinqa_test.jsonl"
     },
     "FinKnow": {
-        "train_data": "./bizbench/data/finknow_test.jsonl",
-        "val_data": "./bizbench/data/finknow_test.jsonl",
+        "train_data": "./bizbench/data/finknow_train.jsonl",
+        "val_data": "./bizbench/data/finknow_val.jsonl",
         "test_data": "./bizbench/data/finknow_test.jsonl"
     },
     "FormulaEval": {
@@ -40,14 +40,19 @@
         "test_data": "./bizbench/data/formulaeval_test.jsonl"
     },
     "finer": {
-        "train_data": "./bizbench/data/finer_train_batched_1000_samples.jsonl",
-        "val_data": "./bizbench/data/finer_val_batched_500_samples.jsonl",
-        "test_data": "./bizbench/data/finer_test_subset_006_seed42.jsonl"
+        "train_data": "./bizbench/data/finer_train.jsonl",
+        "val_data": "./bizbench/data/finer_val.jsonl",
+        "test_data": "./bizbench/data/finer_test.jsonl"
     },
     "formula": {
-        "train_data": "./bizbench/data/formula_train_subset_500.jsonl",
-        "val_data": "./bizbench/data/formula_val_subset_300.jsonl",
+        "train_data": "./bizbench/data/formula_train.jsonl",
+        "val_data": "./bizbench/data/formula_val.jsonl",
         "test_data": "./bizbench/data/formula_test.jsonl"
+    },
+    "factset": {
+        "train_data": "./bizbench/data/factset_train.jsonl",
+        "val_data": "./bizbench/data/factset_val.jsonl",
+        "test_data": "./bizbench/data/factset_test.jsonl"
     }
 }
 

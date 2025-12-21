@@ -1,0 +1,34 @@
+{
+  "target_entity_id": "0016FD-E",
+  "entity_proper_name": "Citrix Systems, Inc.",
+  "iso_country": "US",
+  "primary_sic_name": "",
+  "company_id": 2307,
+  "industry": "Software",
+  "top_segments": [
+    "Technology"
+  ],
+  "cutoff_date": "2017-12-31",
+  "decision_year": 2017,
+  "self_profile": {
+    "factset_entity_id": "0016FD-E",
+    "company_id": 2307,
+    "entity_proper_name": "Citrix Systems, Inc.",
+    "iso_country": "US",
+    "primary_sic_name": "",
+    "cutoff_date": "2017-12-31",
+    "industry": "Software",
+    "top_segments": [
+      "Technology"
+    ]
+  },
+  "metadata": {
+    "extraction_date": "2025-10-03 03:53:41",
+    "total_suppliers": 47,
+    "historical_suppliers": 19,
+    "future_new_suppliers": 9,
+    "random_noise_suppliers": 19,
+    "positive_samples": 17,
+    "negative_samples": 30
+  }
+}
