@@ -1,11 +1,3 @@
-"""
-Reflexion-style generator for BizBench.
-
-Implements initial answer → reflection → rewrite loops. No playbook is used,
-but the generate signature keeps the playbook parameter for interface
-compatibility with evaluate_test_set.
-"""
-
 from __future__ import annotations
 
 import json
@@ -33,10 +25,10 @@ class ReflexionInitial:
             prior_block = "Useful reflections from past similar attempts:\n- " + bullets + "\n\n"
 
         prompt_lines = [
-            "You are a finance-domain reasoning assistant.",
-            "Provide your best answer with concise reasoning.",
+            "You are a finance-domain reasoning assistant. Think carefully and solve the task step by step.",
+            "Provide your best answer with detailed reasoning.",
             "Return a JSON object with ONLY keys `reasoning` and `final_answer`.",
-            "- `reasoning`: a concise but sufficient chain of thought (include code if helpful).",
+            "- `reasoning`: include the full chain of thought, calculations, and intermediate steps (include code if helpful).",
             "- `final_answer`: strictly follow the required answer format (plain number, [[value]], or code+[[value]]).",
             "",
             prior_block if prior_block else "",
@@ -75,7 +67,7 @@ class ReflexionInitial:
 
 
 class ReflexionReflect:
-    """自我反思角色：给出错误诊断与改进建议"""
+    """自我反思角色：输出自由文本改进建议（不要求 JSON）"""
 
     def __init__(self, client, api_provider: str, model: str, max_tokens: int, temperature: float):
         self.client = client
@@ -87,10 +79,8 @@ class ReflexionReflect:
     def _build_prompt(self, question: str, context: str, previous_response: str) -> str:
         prompt_lines = [
             "You are reviewing your previous answer for a finance question.",
-            "Diagnose issues and propose concise fixes.",
-            "Return a JSON object with keys:",
-            '- `is_correct`: true/false to indicate if the previous answer is acceptable;',
-            "- `reflection`: short, actionable bullet-style guidance to improve the answer.",
+            "Provide concise, actionable feedback as free text (no JSON).",
+            "Include: whether it seems correct, the issues, and how to fix them.",
             "",
             "Question (may include format instructions):",
             question,
@@ -101,7 +91,7 @@ class ReflexionReflect:
             "Previous attempt:",
             previous_response,
             "",
-            "Respond strictly in JSON.",
+            "Write the reflection as plain text bullets or sentences. Do NOT return JSON.",
         ]
         return "\n".join(prompt_lines)
 
@@ -143,7 +133,7 @@ class ReflexionRewrite:
         prompt_lines = [
             "You are revising your previous answer using the provided reflections.",
             "Return a JSON object with ONLY keys `reasoning` and `final_answer`.",
-            "- `reasoning`: concise chain of thought showing fixes (code can be placed here).",
+            "- `reasoning`: chain of thought showing fixes (code can be placed here).",
             "- `final_answer`: strictly follow the required answer format (plain number, [[value]], or code+[[value]]).",
             "",
             "Question (may include format instructions):",
@@ -239,18 +229,12 @@ class ReflexionGenerator:
     @staticmethod
     def _parse_reflection(response: str) -> Tuple[str, bool]:
         """
-        Parse reflector output; tolerate non-JSON by falling back to raw text.
-        Returns (reflection_text, is_correct_flag).
+        反思输出采用自由文本，返回 (reflection_text, is_correct_flag)。
+        is_correct 使用简单关键词启发式判定。
         """
-        try:
-            data = json.loads(response)
-            reflection = str(data.get("reflection", "")).strip()
-            is_correct = bool(data.get("is_correct", False))
-            return (reflection or response.strip() or "(no reflection generated)"), is_correct
-        except Exception:
-            # Fallback: simple heuristic
-            is_correct = bool(re.search(r"\b(correct|looks\s+good|no\s+issues)\b", response, re.IGNORECASE))
-            return response.strip() or "(no reflection generated)", is_correct
+        text = (response or "").strip()
+        is_correct = bool(re.search(r"\b(correct|looks\s+good|no\s+issues)\b", text, re.IGNORECASE))
+        return text or "(no reflection generated)", is_correct
 
     def generate(
         self,

@@ -148,7 +148,7 @@ def parse_args():
     parser.add_argument(
         "--gepa_window_budget",
         type=int,
-        default=30,
+        default=150,
         help="GEPA: online 窗口内单窗预算（覆盖总预算均分）。",
     )
     parser.add_argument(

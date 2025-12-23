@@ -8,6 +8,7 @@ Self-refine style generator，显式拆分 Init / Feedback / Iterate 三角色�
 from __future__ import annotations
 
 from typing import List, Tuple, Optional, Dict
+import json
 import re
 
 from utils.tools import initialize_clients
@@ -76,23 +77,30 @@ class SelfRefineFeedback:
         self.temperature = temperature
 
     def _build_prompt(self, question: str, context: str, previous_response: str) -> str:
-        prompt_lines = [
-            "You are reviewing your previous answer for the finance question.",
-            "Provide concise feedback: state if the answer is correct, list specific issues, and give short rewrite hints.",
-            "Return a JSON object with keys `is_correct` (true/false) and `feedback` (concise bullet-style text).",
-            "",
-            "Question (may include format instructions):",
-            question,
-            "",
-            "Context:",
-            context,
-            "",
-            "Previous attempt:",
-            previous_response,
-            "",
-            "Respond strictly in JSON.",
-        ]
-        return "\n".join(prompt_lines)
+            prompt_lines = [
+                "You are a Senior Financial Auditor. Your goal is to VERIFY the previous answer.",
+                "DO NOT assume the previous answer is wrong. DO NOT provide feedback on style or tone.",
+                "Instead, perform the following verification steps:",
+                "1. Independently solve the problem yourself step-by-step in your reasoning.",
+                "2. Compare your result with the 'Previous attempt'.",
+                "3. If they match, mark it as CORRECT.",
+                "4. If they differ, identify EXACTLY where the math or logic diverged.",
+                "",
+                "Return a JSON object with keys `is_correct` (true/false) and `feedback`.",
+                "- `feedback`: start with your own independent calculation, then state the discrepancy if any.",
+                "",
+                "Question:",
+                question,
+                "",
+                "Context:",
+                context,
+                "",
+                "Previous attempt to verify:",
+                previous_response,
+                "",
+                "Respond strictly in JSON.",
+            ]
+            return "\n".join(prompt_lines)
 
     def generate(
         self,
@@ -129,27 +137,31 @@ class SelfRefineIterate:
         self.temperature = temperature
 
     def _build_prompt(self, question: str, context: str, previous_response: str, feedback: str) -> str:
-        prompt_lines = [
-            "You are revising your previous answer for the finance question using the provided feedback.",
-            "Return a JSON object with ONLY keys `reasoning` and `final_answer`.",
-            "- `reasoning`: a concise but complete chain of thought reflecting the fixes (code may be placed here).",
-            "- `final_answer`: strictly follow the question's required answer format (e.g., plain number, [[value]], or code+[[value]] as instructed). Do not add extra keys.",
-            "",
-            "Question (may include format instructions):",
-            question,
-            "",
-            "Context:",
-            context,
-            "",
-            "Previous attempt:",
-            previous_response,
-            "",
-            "Feedback to address:",
-            feedback,
-            "",
-            "Provide the improved JSON answer:",
-        ]
-        return "\n".join(prompt_lines)
+            prompt_lines = [
+                "You are a Final Decision Maker.",
+                "You have an original answer and some feedback/audit notes.",
+                "Your task is to produce the BEST possible final answer.",
+                "CRITICAL INSTRUCTION:",
+                "- Review the feedback carefully. If the feedback points out a clear math error or logic hole, FIX IT.",
+                "- However, if the feedback is vague, incorrect, or nitpicking regarding style, IGNORE IT and stick to the original logic.",
+                "- Do not blindly follow the feedback if it leads to a wrong answer.",
+                "",
+                "Return a JSON object with `reasoning` and `final_answer`.",
+                "- `reasoning`: Explain why you accepted or rejected the feedback, and show the final derivation.",
+                "- `final_answer`: The definitive answer.",
+                "",
+                "Question:",
+                question,
+                "",
+                "Original Answer:",
+                previous_response,
+                "",
+                "Feedback/Audit:",
+                feedback,
+                "",
+                "Provide the final JSON:",
+            ]
+            return "\n".join(prompt_lines)
 
     def generate(
         self,
@@ -189,7 +201,7 @@ class SelfRefineGenerator:
         max_tokens: int,
         refine_rounds: int = 2,
         initial_temperature: float = 0.0,
-        feedback_temperature: float = 0.2,
+        feedback_temperature: float = 0.0,
     ):
         client, _, _ = initialize_clients(api_provider)
         self.api_provider = api_provider
@@ -226,6 +238,23 @@ class SelfRefineGenerator:
     def _normalize(text: Optional[str], fallback: str) -> str:
         text = (text or "").strip()
         return text if text else fallback
+
+    @staticmethod
+    def _feedback_says_correct(feedback_text: str) -> bool:
+        """
+        Robustly判断反馈是否认为答案已正确：
+        - 优先解析 JSON 中的 is_correct
+        - 失败则回退到关键字正则
+        """
+        if not feedback_text:
+            return False
+        try:
+            data = json.loads(feedback_text)
+            if isinstance(data, dict) and data.get("is_correct") is not None:
+                return bool(data.get("is_correct"))
+        except Exception:
+            pass
+        return bool(re.search(r"\b(correct|no issues|looks good)\b", feedback_text, re.IGNORECASE))
 
     def generate(
         self,
@@ -264,8 +293,8 @@ class SelfRefineGenerator:
             )
             call_trace.append({"stage": f"feedback_{step}", "call_info": fb_info})
 
-            # 早停：简单关键字判定
-            if re.search(r"\b(correct|no issues|looks good)\b", fb_response, re.IGNORECASE):
+            # 早停：解析 JSON is_correct，失败再回退关键字
+            if self._feedback_says_correct(fb_response):
                 break
 
             iter_response, iter_info = self.iterate_role.generate(

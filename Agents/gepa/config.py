@@ -13,7 +13,7 @@ class GepaConfig:
     merge_prob: float = 0.9
     seed_prompt: str | None = None
     max_workers: int = 8
-    use_json_mode: bool = False
+    use_json_mode: bool = True
     target_temperature: float = 0.0
     reflection_temperature: float = 0.2
     max_tokens: int = 4096

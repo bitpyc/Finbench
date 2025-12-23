@@ -5,3 +5,4 @@ insight.md
 current_todo.md
 .env
 *.pyc
+*.log

@@ -15,8 +15,9 @@ META_PROMPT = (
     "{inputs_outputs_feedback}\n\n"
     "[[ ## goal ## ]]\n"
     "Propose at most 1 new prompt that keeps what works, fixes weaknesses, improves clarity, "
-    "completeness, and correctness, and is concise. Output ONLY the new improved prompt text. "
-    "Do NOT generate examples from the task."
+    "completeness, and correctness, and is concise. Output ONLY as JSON with field 'list_candidate_prompts', "
+    "where each item has key 'candidate_prompt'. Do NOT generate examples from the task. "
+    "Do NOT add any lead-in text or preamble; return only the prompt itself inside the JSON."
 )
 
 INITIAL_CANDIDATES_GENERATION_PROMPT = (
@@ -31,8 +32,9 @@ INITIAL_CANDIDATES_GENERATION_PROMPT = (
     "[[ ## goal ## ]]\n"
     "Generate a set of diverse and high-quality candidate prompts or instructions for the task "
     "using the seed prompt as your reference. Provide at most {num_new_prompts} new candidate prompts. "
-    "Output ONLY the synthesized candidate prompts as JSON with field 'list_candidate_prompts' where "
-    "each item has key 'candidate_prompt'. Do NOT generate examples from the task."
+    "Output ONLY as JSON with field 'list_candidate_prompts' where each item has key 'candidate_prompt'. "
+    "Do NOT generate examples from the task. "
+    "Do NOT add any lead-in text or explanation; return only the prompts inside JSON."
 )
 
 MERGING_PROMPT = (
@@ -44,7 +46,7 @@ MERGING_PROMPT = (
     "Synthesize the candidate prompts into a single, coherent prompt that captures the essence of all the candidates. "
     "The synthesis must be done such that the weaknesses of the individual candidates are addressed. "
     "Output ONLY the merged candidate prompt as JSON with field 'list_candidate_prompts', "
-    "each item having key 'candidate_prompt'."
+    "each item having key 'candidate_prompt'. Do NOT add any lead-in text or explanation."
 )
 
 

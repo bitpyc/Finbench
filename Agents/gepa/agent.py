@@ -65,6 +65,7 @@ class GEPAAgent:
         max_workers: int,
         use_json_mode: bool,
         task_name: str = "",
+        use_accuracy: bool = False,
     ) -> Dict[str, Any]:
         """使用给定 prompt 评测完整样本集，返回 accuracy 与错误列表。"""
         def _eval_single(idx: int, sample: Dict[str, Any]) -> Dict[str, Any]:
@@ -77,7 +78,7 @@ class GEPAAgent:
                 role="generator",
                 call_id=f"gepa_final_{idx}",
                 max_tokens=self.max_tokens,
-                use_json_mode=use_json_mode,
+                use_json_mode=False,  # 生成端固定不使用 JSON，避免结构化错误响应
                 temperature=self.cfg.target_temperature,
             )
             # 尽量解析最终答案；若解析失败则回退原始响应，避免统一变成 "No final answer found"
@@ -151,11 +152,40 @@ class GEPAAgent:
             overall_correct, overall_total = 0, 0
             window_records: List[Dict[str, Any]] = []
             trace_entries: List[Dict[str, Any]] = []
+            seen_pool: List[Dict[str, Any]] = []
 
             for w in range(num_windows):
                 start = w * window_size
                 end = min((w + 1) * window_size, len(test_samples))
                 window_samples = test_samples[start:end]
+                seen_pool.extend(window_samples)
+
+                # 构造 Dpareto / Dfeedback：从累计池抽样，确保 Dfeedback >= 2 * |Dpareto|
+                pool_size = len(seen_pool)
+                min_pareto = max(15, self.cfg.mini_batch_size * 2)
+                pareto_size = min(pool_size, min_pareto)
+                feedback_target = max(pareto_size * 2, self.cfg.mini_batch_size * 4)
+                feedback_size = min(pool_size, feedback_target)
+
+                if pareto_size == 0:
+                    raise ValueError("累计样本池为空，无法构建 Dpareto/Dfeedback。")
+
+                Dpareto = random.sample(seen_pool, pareto_size) if pool_size > pareto_size else list(seen_pool)
+                remaining_pool = [s for s in seen_pool if s not in Dpareto]
+                if len(remaining_pool) >= feedback_size:
+                    Dfeedback = random.sample(remaining_pool, feedback_size)
+                else:
+                    Dfeedback = list(seen_pool) if pool_size >= feedback_size else list(seen_pool)
+
+                # 预算下限提示：初始评估 + 一次改进 + 两个 mini-batch
+                required_budget = self.cfg.num_initial * len(Dpareto) + len(Dpareto) + self.cfg.mini_batch_size * 2
+                window_budget = self.cfg.window_budget or self.cfg.budget
+                if window_budget < required_budget:
+                    print(
+                        f"[GEPA][warn] window {w+1} 预算可能不足："
+                        f"window_budget={window_budget}, 建议至少 {required_budget} "
+                        f"(Dpareto={len(Dpareto)}, mini_batch_size={self.cfg.mini_batch_size}, num_initial={self.cfg.num_initial})"
+                    )
 
                 # Step 1: 先评测
                 eval_res = self._evaluate_with_prompt(
@@ -181,14 +211,9 @@ class GEPAAgent:
                     }
                 )
 
-                # Step 2: 在窗口样本上优化 GEPA（反馈+评分同源），每窗口单独预算
+                # Step 2: 在窗口样本上优化 GEPA，每窗口单独预算
                 window_budget = self.cfg.window_budget or self.cfg.budget
-                # 为避免初始开销过大，窗口优化仅用上一窗口 best 作为单一初始候选
-                win_cfg = replace(
-                    self.cfg,
-                    budget=window_budget,
-                    num_initial=1,
-                )
+                win_cfg = replace(self.cfg, budget=window_budget, num_initial=1)
                 gepa_result: GepaResult = run_gepa(
                     generator_client=self.generator_client,
                     reflection_client=self.reflector_client,
@@ -196,9 +221,12 @@ class GEPAAgent:
                     target_model=self.generator_model,
                     reflection_model=self.reflector_model,
                     cfg=win_cfg,
-                    Dpareto=window_samples,
-                    Dfeedback=window_samples,
+                    Dpareto=Dpareto,
+                    Dfeedback=Dfeedback,
                     initial_candidates=[best_prompt],
+                    use_accuracy=True,
+                    data_processor=data_processor,
+                debug=True,
                 )
                 for t in gepa_result.trace:
                     t["window"] = w + 1
@@ -321,6 +349,9 @@ class GEPAAgent:
                 cfg=self.cfg,
                 Dpareto=Dpareto,
                 Dfeedback=Dfeedback,
+                use_accuracy=True,
+                data_processor=data_processor,
+                debug=True,
             )
 
             # 记录 trace

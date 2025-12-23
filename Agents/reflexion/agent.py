@@ -33,7 +33,7 @@ class ReflexionAgent:
         initial_temperature: float = 0.0,
         reflect_temperature: float = 0.2,
         agent_method: str = "reflexion",
-        strict_sequential: bool = False,
+        strict_sequential: bool = True,
         memory_top_k: int = 3,
     ):
         self.agent_method = agent_method
@@ -74,6 +74,9 @@ class ReflexionAgent:
         if not self.memory_path:
             return
         self.memory.append(entry)
+        # 长记忆截断：仅保留最近 memory_top_k 条
+        if len(self.memory) > self.memory_top_k:
+            self.memory = self.memory[-self.memory_top_k :]
         with open(self.memory_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 

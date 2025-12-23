@@ -28,7 +28,7 @@ class ChainOfThoughtGenerator:
         prompt_lines = [
             "You are a finance-domain reasoning assistant. Think carefully and solve the task step by step.",
             "Follow the answer-format instructions exactly as they appear inside the question text.",
-            "Return a JSON object with the keys `reasoning`, `bullet_ids`, and `final_answer`.",
+            "Return a JSON object with the keys `reasoning`, and `final_answer`.",
             "- `reasoning`: include the full chain of thought, calculations, and intermediate steps.",
             "- `final_answer`: restate the answer exactly as required by the question instructions.",
             "",

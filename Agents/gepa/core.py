@@ -13,6 +13,7 @@ import numpy as np
 
 from utils.llm import timed_llm_call
 from utils.tools import extract_answer
+from bizbench.data_processor import DataProcessor
 
 from .config import GepaConfig
 from .prompts import (
@@ -24,7 +25,7 @@ from .prompts import (
 
 
 def _parse_candidate_list(text: str) -> List[str]:
-    """尽力解析 reflection 返回的候选 prompt 列表。"""
+    """解析 JSON 结构的候选 prompt 列表，退化为按行拆分。"""
     if not text:
         return []
 
@@ -54,16 +55,35 @@ def _parse_candidate_list(text: str) -> List[str]:
 
     # 退化：按行拆
     candidates = [line.strip("- \t") for line in cleaned.splitlines() if line.strip()]
-    return [c for c in candidates if c]
+    return candidates
 
 
 def _eval_metric(pred: Any, gt: Any) -> float:
-    """
-    统一转成字符串再计算相似度，避免非序列对象（如 dict）导致 SequenceMatcher KeyError。
-    """
+    """Retained for potential fallback; not used when accuracy-based eval is enabled."""
     pred_str = "" if pred is None else str(pred)
     gt_str = "" if gt is None else str(gt)
     return round(SequenceMatcher(None, pred_str, gt_str).ratio(), 3)
+
+
+def _pick_prediction(sample: Dict[str, Any], resp: Any, task_name: str, data_processor=None) -> str:
+    """
+    对代码补全类任务优先提取 code block；否则回退 extract_answer。
+    """
+    if task_name == "FormulaEval":
+        try:
+            if data_processor and hasattr(data_processor, "_extract_code_block"):
+                code_block = data_processor._extract_code_block(str(resp))
+            else:
+                processor = DataProcessor(task_name)
+                code_block = processor._extract_code_block(str(resp))
+            if code_block:
+                return code_block
+        except Exception:
+            pass
+    pred = extract_answer(resp)
+    if pred == "No final answer found":
+        pred = resp
+    return pred
 
 
 def _build_query(sample: Dict[str, Any], prompt: str) -> str:
@@ -190,6 +210,9 @@ def run_gepa(
     Dpareto: List[Dict[str, Any]],
     Dfeedback: List[Dict[str, Any]],
     initial_candidates: List[str] | None = None,
+    use_accuracy: bool = False,
+    data_processor=None,
+    debug: bool = False,
 ) -> GepaResult:
     if not Dpareto:
         raise ValueError("Dpareto 为空")
@@ -213,6 +236,16 @@ def run_gepa(
     S = np.zeros((len(candidates), len(Dpareto)), dtype=float)
 
     # 评估初始候选
+    def _log_debug(prefix: str, resp: Any, pred: Any, gt: Any) -> None:
+        if not debug:
+            return
+
+        def _trunc(x):
+            s = str(x)
+            return s if len(s) <= 400 else s[:400] + "...(truncated)"
+
+        print(f"[GEPA][debug] {prefix} resp={_trunc(resp)} pred={_trunc(pred)} gt={_trunc(gt)}")
+
     def _eval_candidate(j: int, candidate: Dict[str, Any]) -> None:
         local_scores = []
         prompt = candidate["prompt"]
@@ -229,8 +262,13 @@ def run_gepa(
                 use_json_mode=False,
                 temperature=cfg.target_temperature,
             )
-            pred = extract_answer(resp)
-            score = _eval_metric(pred, sample.get("target", ""))
+            pred = _pick_prediction(sample, resp, data_processor.task_name if data_processor else "", data_processor)
+            if use_accuracy and data_processor is not None:
+                score = 1.0 if data_processor.answer_is_correct(pred, sample.get("target", "")) else 0.0
+            else:
+                score = _eval_metric(pred, sample.get("target", ""))
+            if debug and use_accuracy and score == 0.0 and h < 2:
+                _log_debug(f"init_eval j={j} h={h}", resp, pred, sample.get("target", ""))
             local_scores.append(score)
         candidate["scores"] = local_scores
         candidate["mean_score"] = float(np.mean(local_scores))
@@ -309,8 +347,13 @@ def run_gepa(
                 use_json_mode=False,
                 temperature=cfg.target_temperature,
             )
-            pred = extract_answer(resp)
-            score = _eval_metric(pred, sample.get("target", ""))
+            pred = _pick_prediction(sample, resp, data_processor.task_name if data_processor else "", data_processor)
+            if use_accuracy and data_processor is not None:
+                score = 1.0 if data_processor.answer_is_correct(pred, sample.get("target", "")) else 0.0
+            else:
+                score = _eval_metric(pred, sample.get("target", ""))
+            if debug and use_accuracy and score == 0.0 and call_idx < 2:
+                _log_debug(f"mini_eval sel={selected['id']} idx={call_idx}", resp, pred, sample.get("target", ""))
             return score, pred
 
         mini_scores = []
@@ -371,8 +414,14 @@ def run_gepa(
                 use_json_mode=False,
                 temperature=cfg.target_temperature,
             )
-            pred = extract_answer(resp)
-            return _eval_metric(pred, sample.get("target", ""))
+            pred = _pick_prediction(sample, resp, data_processor.task_name if data_processor else "", data_processor)
+            if use_accuracy and data_processor is not None:
+                score = 1.0 if data_processor.answer_is_correct(pred, sample.get("target", "")) else 0.0
+            else:
+                score = _eval_metric(pred, sample.get("target", ""))
+            if debug and use_accuracy and score == 0.0 and call_idx < 2:
+                _log_debug(f"new_eval cand={len(candidates)} idx={call_idx}", resp, pred, sample.get("target", ""))
+            return score
 
         new_scores = []
         with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
