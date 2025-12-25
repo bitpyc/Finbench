@@ -108,7 +108,7 @@ def main():
     parser.add_argument(
         "--generator_model",
         type=str,
-        default="gpt-5.1-mini",
+        default="gpt-5",
         help="LLM model name for the candidate agent.",
     )
     parser.add_argument(
