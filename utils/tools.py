@@ -3,6 +3,7 @@ import os
 import re
 import json
 import openai
+import os
 import tiktoken
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Tuple
@@ -33,8 +34,10 @@ def initialize_clients(api_provider):
             raise ValueError("OpenAI api key not found in environment variables")
     elif api_provider == "usd_guiji":
         # Use custom USD Guiji endpoint
-        base_url = "http://35.220.164.252:3888/v1/"
-        api_key = "sk-ootpHOnH9xUYVYMSGiw0aZDdltzltDT4inWX9Z3nsgVWSaA0"
+        base_url = os.getenv("USD_GUIJI_BASE_URL", "http://35.220.164.252:3888/v1/")
+        api_key = os.getenv("USD_GUIJI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("USD_GUIJI_API_KEY or OPENAI_API_KEY must be set for usd_guiji provider")
     else:
         raise ValueError((
             f"Invalid api_provider name: {api_provider}. "

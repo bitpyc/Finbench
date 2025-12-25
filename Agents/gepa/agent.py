@@ -195,7 +195,7 @@ class GEPAAgent:
                     log_dir=log_dir,
                     max_workers=self.cfg.max_workers,
                     use_json_mode=self.cfg.use_json_mode,
-                task_name=config.get("task_name", ""),
+                    task_name=config.get("task_name", ""),
                 )
                 overall_correct += eval_res["correct"]
                 overall_total += eval_res["total"]
@@ -214,6 +214,7 @@ class GEPAAgent:
                 # Step 2: 在窗口样本上优化 GEPA，每窗口单独预算
                 window_budget = self.cfg.window_budget or self.cfg.budget
                 win_cfg = replace(self.cfg, budget=window_budget, num_initial=1)
+                prev_best_prompt = best_prompt
                 gepa_result: GepaResult = run_gepa(
                     generator_client=self.generator_client,
                     reflection_client=self.reflector_client,
@@ -228,10 +229,37 @@ class GEPAAgent:
                     data_processor=data_processor,
                 debug=True,
                 )
+                # 仅当本窗最优候选优于初始候选才更新跨窗 best_prompt
+                init_score = None
+                for c in gepa_result.candidates:
+                    if c.get("id") == 0:
+                        init_score = c.get("mean_score")
+                        break
+                best_score = gepa_result.best_candidate.get("mean_score")
+                improved = (
+                    init_score is None
+                    or best_score is None
+                    or best_score > init_score
+                )
+
                 for t in gepa_result.trace:
                     t["window"] = w + 1
                 trace_entries.extend(gepa_result.trace)
-                best_prompt = gepa_result.best_prompt
+                if improved:
+                    best_prompt = gepa_result.best_prompt
+                else:
+                    best_prompt = prev_best_prompt
+                    trace_entries.append(
+                        {
+                            "step": len(trace_entries),
+                            "window": w + 1,
+                            "strategy": "cross-window-keep",
+                            "accepted": False,
+                            "reason": "no_improvement_on_window",
+                            "init_mean": init_score,
+                            "best_mean": best_score,
+                        }
+                    )
 
             accuracy = overall_correct / overall_total if overall_total else 0.0
             final_results = {

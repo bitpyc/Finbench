@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .data_processor import DataProcessor
+from utils.easyhard import convert_domain_results
 
 
 def parse_args():
@@ -27,7 +28,8 @@ def parse_args():
     parser.add_argument(
         "--task_name",
         type=str,
-        required=True,
+        required=False,
+        default=None,
         choices=[
             "FinCode",
             "CodeFinQA",
@@ -41,7 +43,20 @@ def parse_args():
             "formula",
             "factset",
         ],
-        help="BizBench task to run",
+        help="BizBench task to run（run_mode=dataname 时必填，easyhard 时忽略）",
+    )
+    parser.add_argument(
+        "--run_mode",
+        type=str,
+        default="dataname",
+        choices=["dataname", "easyhard"],
+        help="dataname: 按数据集正常运行；easyhard: 按 domain 对现有结果做难度聚合转换。",
+    )
+    parser.add_argument(
+        "--domain",
+        type=str,
+        default=None,
+        help="当 run_mode=easyhard 时必填，取值: Finance_Reasoning, Span_extraction, Knowledge_understand（下划线替代表达空格）。",
     )
     # ace specific knobs
     parser.add_argument("--mode", type=str, default="offline",
@@ -74,6 +89,7 @@ def parse_args():
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--playbook_token_budget", type=int, default=80000)
     parser.add_argument("--test_workers", type=int, default=20)
+    # ConsultingInterview-specific args removed
     parser.add_argument(
         "--data_embedding_dir",
         type=str,
@@ -324,6 +340,22 @@ def load_initial_playbook(path: str):
 
 def main():
     args = parse_args()
+    # easyhard 模式：基于现有结果做转换，不重新跑模型
+    if args.run_mode == "easyhard":
+        if not args.domain:
+            raise ValueError("run_mode=easyhard 时必须提供 --domain")
+        domain = args.domain.replace(" ", "_")
+        convert_domain_results(
+            domain=domain,
+            agent_method=args.agent_method,
+            mode=args.mode,
+            config_path=args.config_path,
+            results_root=args.save_path,
+        )
+        return
+    if not args.task_name:
+        raise ValueError("run_mode=dataname 时必须提供 --task_name")
+
     if args.agent_method == "self-refine":
         # 统一成模块友好的命名
         args.agent_method = "self_refine"
@@ -358,7 +390,6 @@ def main():
 
     # 保留所有 CLI 参数到 config，方便 run_config.json 完整记录
     config = vars(args).copy()
-    # 兼容下游使用的 save_dir 字段
     config["save_dir"] = args.save_path
 
     if args.agent_method == "ace":
@@ -523,7 +554,6 @@ def main():
         )
     else:
         raise ValueError(f"未知的 agent_method: {args.agent_method}")
-
 
 if __name__ == "__main__":
     main()
