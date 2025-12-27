@@ -19,7 +19,7 @@ LETTER_OPTIONS = ["A", "B", "C", "D", "E", "F"]
 
 def load_data(data_path: str) -> List[Dict[str, Any]]:
     """
-    Load JSONL data for bizbench tasks.
+    Load JSONL data for StructuredReasoning tasks.
 
     Args:
         data_path: Path to JSON Lines file.
@@ -273,7 +273,7 @@ def exec_python(code: str, timeout: float = 1.0) -> Dict[str, Any]:
 
 class DataProcessor:
     """
-    Task-specific processor for bizbench datasets.
+    Task-specific processor for StructuredReasoning datasets.
     """
 
     PROGRAM_SYNTHESIS = "program_synthesis"

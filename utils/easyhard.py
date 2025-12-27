@@ -316,6 +316,14 @@ def _load_test_results(test_results_path: str) -> Tuple[float, int, List[dict]]:
     total = 0
     accuracy = 0.0
 
+    # Some runners (e.g., certain GEPA offline) store final results here
+    if "final_test_results" in payload and isinstance(payload["final_test_results"], dict):
+        ftr = payload["final_test_results"]
+        total = ftr.get("total", total) or total
+        accuracy = ftr.get("accuracy", accuracy) or accuracy
+        if isinstance(ftr.get("errors"), list):
+            errors = ftr.get("errors", []) or []
+
     # GEPA: window_results 内部有 errors，index 为窗口内索引，需要加 start
     if "test_results" in payload and isinstance(payload["test_results"], dict):
         tr = payload["test_results"]

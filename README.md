@@ -1,359 +1,72 @@
-# Agentic Context Engineering: Evolving Contexts for Self-Improving Language Models
+# FirmBench
 
-<div align="left">
+<!-- Introduction 暂略 -->
 
-[![arXiv](https://img.shields.io/badge/arXiv-2510.04618-b31b1b.svg)](https://arxiv.org/abs/2510.04618)
+## Quick Start（仅 Online 模式）
 
-<img src="assets/images/ace_framework.png" alt="ACE Framework" width="800"/>
+下面以 **StructuredReasoning** 与 **Consulting** 两个子基准为例说明如何运行 Online 实验、以及如何汇总 capability / difficulty 维度的结果。
 
-</div>
+> 约定：所有命令都在仓库根目录执行（即本仓库顶层目录）。
 
----
+### 0) 前置准备
 
-## 🎯 Overview
+- **Python**：确保可用 `python` / `python3`（建议 Python 3.10+）。
+- **LLM 调用配置**：脚本中默认使用 `--api_provider usd_guiji`（以及对应模型名），请按你的环境配置好对应的密钥/网关/SDK。
+- **Online 模式数据**：Online 模式只会用到各任务的 **`*_test.jsonl`**（例如 `StructuredReasoning/data/*_test.jsonl`）。
 
-ACE (Agentic Context Engineering) is a framework that enables large language models to self-improve by treating contexts as evolving playbooks that accumulate, refine, and organize strategies through a modular process of generation, reflection, and curation. Unlike traditional approaches that suffer from **brevity bias** and **context collapse**, ACE introduces structured, incremental updates guided by a grow-and-refine principle, preserving detailed, domain-specific knowledge while remaining comprehensive and scalable throughout adaptation.
+### 1) 生成 capability / difficulty 划分（LLM reclassify）
 
-### Key Features
+在做 capability/difficulty 维度汇总之前，需要先对样本做 LLM 重标注，产物会写入：
 
-- 🔄 **Three-Role Agentic Architecture**: Generator, Reflector, and Curator work together to continuously improve contexts
-- 📈 **Incremental Delta Updates**: Localized edits that preserve prior knowledge while accumulating new insights
-- 🎓 **Self-Supervised Learning**: Adapts effectively without labeled supervision by leveraging natural execution feedback
-- 🚀 **High Efficiency**: 86.9% lower adaptation latency on average compared to existing adaptive methods
-- 💰 **Cost Effective**: Significantly fewer rollouts and lower dollar costs while achieving higher accuracy
+- `results/StructuredReasoning_run/llm_reclassify_mode/<output_name>/<split>/classifications.jsonl`
 
-## 📊 Performance
-
-ACE consistently outperforms strong baselines, achieving average gains of **+10.6%** on agent tasks and **+8.6%** on domain-specific benchmarks, across both offline and online adaptation settings.
-
-### Benchmarks
-
-| Task Category | Dataset | Improvement | Details |
-|---------------|---------|-------------|---------|
-| **Agent Tasks** | AppWorld | +10.6% | Matches top-ranked production-level agent (GPT-4.1) on average and surpasses it on harder test-challenge split, using smaller open-source model |
-| **Finance** | FiNER + XBRL Formula | +8.6% | Domain-specific reasoning with structured information extraction |
-
-### Efficiency Improvements
-
-- **Offline (AppWorld)**: -82.3% latency and -75.1% rollouts vs GEPA
-- **Online (FiNER)**: -91.5% latency and -83.6% token cost vs Dynamic Cheatsheet
-
-
-### How It Works
-
-1. **Generator** produces reasoning trajectories for new queries, surfacing both effective strategies and recurring pitfalls
-2. **Reflector** separates evaluation and insight extraction from curation, improving context quality
-3. **Curator** converts lessons into structured delta updates with helpful/harmful counters, using deterministic merging with de-duplication and pruning
-
-This design prevents the **context collapse** problem where iterative rewriting erodes details over time.
-
-## 🚀 Quick Start
-
-### Installation
+运行（Online 模式通常只需要 `test`）：
 
 ```bash
-# Clone the repository
-git clone https://github.com/ace-agent/ace.git
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up API keys
-cp .env.example .env
-# Edit .env with your API keys
+bash run_scripts/StructuredReasoning/data_process/reclassify_test.sh
 ```
 
-### Basic Usage
-
-```python
-from Agents.ace import ACE
-from utils.tools import initialize_clients
-
-# Initialize API clients
-api_provider = "sambanova" # or "together", "openai"
-
-# Initialize ACE system
-ace_system = ACE(
-    api_provider=api_provider,
-    generator_model="DeepSeek-V3.1",
-    reflector_model="DeepSeek-V3.1",
-    curator_model="DeepSeek-V3.1",
-    max_tokens=4096
-)
-
-# Prepare configuration
-config = {
-    'num_epochs': 1,
-    'max_num_rounds': 3,
-    'curator_frequency': 1,
-    'eval_steps': 100,
-    'online_eval_frequency': 15,
-    'save_steps': 50,
-    'playbook_token_budget': 80000,
-    'task_name': 'your_task',
-    'json_mode': False,
-    'no_ground_truth': False,
-    'save_dir': './results',
-    'test_workers': 20,
-    'use_bulletpoint_analyzer': false,
-    'api_provider': api_provider
-
-}
-
-# Offline adaptation
-results = ace_system.run(
-    mode='offline',
-    train_samples=train_data,
-    val_samples=val_data,
-    test_samples=test_data,  # Optional
-    data_processor=processor,
-    config=config
-)
-
-# Online adaptation
-results = ace_system.run(
-    mode='online',
-    test_samples=test_data,
-    data_processor=processor,
-    config=config
-)
-
-# Evaluation only
-results = ace_system.run(
-    mode='eval_only',
-    test_samples=test_data,
-    data_processor=processor,
-    config=config
-)
-```
-
-## 💼 Finance Domain Example
-
-### Training Script Usage
-
-The `finance/run.py` script provides a unified interface for training and evaluation on financial analysis tasks.
+可选（如你也需要 train/val 的标注）：
 
 ```bash
-# Offline training (with automatic initial and final testing)
-python -m finance.run \
-    --task_name finer \
-    --mode offline \
-    --save_path results
-
-# Online training and testing
-python -m finance.run \
-    --task_name finer \
-    --mode online \
-    --save_path results
-
-# Run evaluation on the test split only. Provide a pre-trained playbook or leave initial_playbook_path empty to evaluate an uninitialized playbook.
-python -m finance.run \
-    --task_name finer \
-    --mode eval_only \
-    --initial_playbook_path results/finer/ace/offline/TIMESTAMP/best_playbook.txt \
-    --save_path test_results
-
-# Training with custom configuration
-python -m finance.run \
-    --task_name finer \
-    --mode offline \
-    --save_path results \
-    --num_epochs 3 \
-    --eval_steps 100 \
-    --max_tokens 4096
+bash run_scripts/StructuredReasoning/data_process/reclassify_train.sh
+bash run_scripts/StructuredReasoning/data_process/reclassify_valid.sh
 ```
 
-#### Available Arguments
-<details>
-<summary>Click here to see available arguments</summary>
+### 2) StructuredReasoning：运行各智能体 Online 实验
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--task_name` | Task to train on (e.g., `finer`, `formula`) | Required |
-| `--save_path` | Directory to save results | Required |
-| `--initial_playbook_path` | Path to initial playbook | Optional |
-| `--mode` | Run mode: 'offline' for offline training with validation, 'online' for online training and testing on test split, 'eval_only' for evaluation only | `offline` |
-| `--api_provider` | API provider for LLM calls. Choose from ['sambanova', 'together', 'openai'] | `sambanova` |
-| `--num_epochs` | Number of training epochs | 1 |
-| `--max_num_rounds` | Max reflection rounds for incorrect answers | 3 |
-| `--curator_frequency` | Run curator every N steps | 1 |
-| `--eval_steps` | Evaluate every N steps | 100 |
-| `--online_eval_frequency` | Update playbook every N samples for evaluation in online mode | 15 |
-| `--save_steps` | Save intermediate playbooks every N steps | 50 |
-| `--max_tokens` | Maximum tokens for LLM responses | 4096 |
-| `--playbook_token_budget` | Total token budget for playbook | 80000 |
-| `--test_workers` | Number of parallel workers for testing | 20 |
-| `--generator_model` | Model for generator | `DeepSeek-V3.1` |
-| `--reflector_model` | Model for reflector | `DeepSeek-V3.1` |
-| `--curator_model` | Model for curator | `DeepSeek-V3.1` |
-| `--json_mode` | Enable JSON mode for structured output | False |
-| `--no_ground_truth` | Don't use ground truth in reflection | False |
-| `--use_bulletpoint_analyzer` | Enable bulletpoint analyzer for playbook deduplication and merging | False |
-| `--bulletpoint_analyzer_threshold` | Similarity threshold for bulletpoint analyzer (0-1) | 0.9 |
+StructuredReasoning 的 Online 脚本位于 `run_scripts/StructuredReasoning/online/<agent_method>/*.sh`，
+运行后会在 `results/StructuredReasoning_run/<Task>/<agent_method>/online/<timestamp>/` 下生成对应的 `test_results.json` 等文件。
 
-</details>
+为了避免读者逐个 `bash`，可以一键启动所有 agent 的 Online 脚本（会排除 `capability_eval` 目录）：
 
-## 📈 Results and Outputs
-
-Using offline training as an example, after training, ACE generates:
-
-```
-results/
-└── finer/
-    └── ace/
-        └── offline/
-            └── TIMESTAMP/
-                ├── run_config.json                # Training configuration
-                ├── final_results.json             # Consolidated results from all stages
-                ├── initial_test_results.json      # Initial test results with empty playbook (baseline)
-                ├── final_test_results.json        # Final test results with best playbook
-                ├── train_results.json             # Training results
-                ├── val_results.json               # Validation results and error logs
-                ├── pre_train_post_train_results.json  # Detailed generator outputs
-                ├── final_playbook.txt             # Final evolved context
-                ├── best_playbook.txt              # Best performing context (only for offline training)
-                ├── bullet_usage_log.jsonl         # Bullet usage tracking
-                ├── curator_operations_diff.jsonl  # Curator operation tracking
-                ├── detailed_llm_logs/             # Detailed LLM call logs
-                └── intermediate_playbooks/        # Intermediate playbooks 
+```bash
+bash run_scripts/StructuredReasoning/online/run_all_agents_online.sh
 ```
 
-### Understanding Playbook Format
+> 说明：这些脚本大多使用 `nohup ... &` 后台启动，会同时起很多进程；如需控制规模，请自行挑选 agent 或数据集脚本运行。
 
-The evolved context (playbook) follows this structure:
+### 3) StructuredReasoning：按 capability / difficulty 汇总 Online 结果
 
-```
-## STRATEGIES & INSIGHTS
-[str-00001] helpful=5 harmful=0 :: Always verify data types before processing
-[str-00002] helpful=3 harmful=1 :: Consider edge cases in financial data
+当 `results/StructuredReasoning_run/**/online/**/test_results.json` 已生成，并且第 1 步的 `classifications.jsonl` 已准备好后，运行：
 
-## FORMULAS & CALCULATIONS
-[cal-00003] helpful=8 harmful=0 :: NPV = Σ(Cash Flow / (1+r)^t)
-
-## COMMON MISTAKES TO AVOID
-[mis-00004] helpful=6 harmful=0 :: Don't forget timezone conversions
+```bash
+bash run_scripts/StructuredReasoning/online/capability_eval/online/capability_eval_online.sh
 ```
 
-Each bullet has:
-- **ID**: `[section_slug-00000]` for tracking
-- **Counts**: `helpful=X harmful=Y` updated by Reflector
-- **Content**: `:: actual advice or strategy`
+默认输出目录：
 
-## 🎓 Key Innovations
+- `results/StructuredReasoning_run/capability_eval_mode/`
+- CSV 表格通常会在：`results/StructuredReasoning_run/capability_eval_mode/_tables/online/<timestamp>/capability_eval.csv`
 
-### 1. Incremental Delta Updates
+### 4) Consulting：运行各智能体 Online 实验
 
-Instead of rewriting full prompts, ACE performs delta updates—localized edits that accumulate new insights while preserving prior knowledge.
+Consulting 的 Online 脚本位于 `run_scripts/Consulting/online/*.sh`，运行后会在 `results/Consulting/<agent_method>/online/<timestamp>/` 生成 `test_results.json` 等文件。
 
-### 2. Grow-and-Refine Mechanism
+同样提供一键启动：
 
-A mechanism that balances steady context expansion with redundancy management by merging or pruning context items based on semantic similarity.
-
-### 3. Dedicated Reflector
-
-A specialized Reflector that separates evaluation and insight extraction from curation, improving context quality and downstream performance.
-
-## 📬 Supported Tasks
-
-### Agent Tasks
-- **AppWorld**: Simulated digital environment with app interactions
-
-### Domain-Specific Tasks
-- **FiNER**: Financial information extraction
-- **XBRL Formula**: Structured financial data processing
-
-## 🛠️ Extending ACE
-
-ACE is designed to be easily extended to new tasks and domains. To add your own task:
-
-1. **Prepare your data**: Create JSONL files with train/val/test splits
-2. **Implement DataProcessor**: Only 3 methods needed - `process_task_data()`, `answer_is_correct()`, `evaluate_accuracy()`
-3. **Create training script**: Initialize ACE and run training using the `run()` method
-4. **Customize prompts** (optional): Adapt prompts to your domain
-
-The evaluation orchestration (parallel test execution, result aggregation) is handled by reusable utilities in `utils.py`, so you only need to focus on task-specific logic.
-
-### Quick Example
-
-```python
-class DataProcessor:
-    def process_task_data(self, raw_data):
-        # Convert your data format to standardized format
-        return [{"context": ..., "question": ..., "target": ..., "others": {...}}]
-    
-    def answer_is_correct(self, predicted, ground_truth):
-        # Your comparison logic
-        return predicted.strip() == ground_truth.strip()
-    
-    def evaluate_accuracy(self, predictions, ground_truths):
-        # Calculate accuracy
-        return sum(self.answer_is_correct(p, g) for p, g in zip(predictions, ground_truths)) / len(predictions)
-```
-
-📖 **[Read the full extension guide →](EXTENDING_ACE.md)**
-
-The guide includes:
-- Step-by-step tutorial with complete code examples
-- Repository structure overview
-- Key implementation notes and best practices
-- Prompt customization guide
-- Reference to the `finance/` implementation
-- Troubleshooting tips and advanced topics
-
-
-
-## 📝 Citation
-
-If you use ACE in your research, please cite our paper:
-
-```bibtex
-@misc{zhang2025agenticcontextengineeringevolving,
-      title={Agentic Context Engineering: Evolving Contexts for Self-Improving Language Models}, 
-      author={Qizheng Zhang and Changran Hu and Shubhangi Upasani and Boyuan Ma and Fenglu Hong and Vamsidhar Kamanuru and Jay Rainton and Chen Wu and Mengmeng Ji and Hanchen Li and Urmish Thakker and James Zou and Kunle Olukotun},
-      year={2025},
-      eprint={2510.04618},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2510.04618}, 
-}
+```bash
+bash run_scripts/Consulting/online/run_all_online.sh
 ```
 
 
-## 🤝 Contributing [TODO]
-
-(Placeholder) We welcome contributions! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📧 Contact
-
-For questions and feedback:
-
-- **Paper Authors**: See [arXiv paper](https://arxiv.org/abs/2510.04618) for author contact information
-- **Issues**: Please open an issue on GitHub
-- **Discussions**: Join the [GitHub Discussions](../../discussions)
-
-## 🙏 Acknowledgments
-
-This work builds upon insights from Dynamic Cheatsheet and incorporates ideas from the broader LLM agent and context optimization research community.
-
-## 📚 Additional Resources
-
-- **Blog Posts**: 
-  - [Medium: Agentic Context Engineering](https://medium.com/@bingqian/agentic-context-engineering-teaching-language-models-to-learn-from-experience-706c31a872ca)
-  - [MarkTechPost Coverage](https://www.marktechpost.com/2025/10/10/agentic-context-engineering-ace-self-improving-llms-via-evolving-contexts-not-fine-tuning/)
-  - [InfoQ Article](https://www.infoq.com/news/2025/10/agentic-context-eng/)
-
----
-
-<div align="center">
-
-**⭐ Star us on GitHub if ACE helps your research!**
-
-Made with ❤️ by the ACE team
-
-</div>

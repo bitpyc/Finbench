@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 批量为 bizbench/data 下的所有 *test.jsonl 生成 embedding CSV
+# 批量为 StructuredReasoning/data 下的所有 *test.jsonl 生成 embedding CSV
 # 默认使用本地 SimCSE 模型；如需切换可修改 BACKEND/模型参数。
 
 BACKEND="simcse"
@@ -10,8 +10,8 @@ SIM_DEVICE="auto"
 SIM_MAX_LENGTH=256
 BATCH_SIZE=32
 
-DATA_DIR="bizbench/data"
-OUT_DIR="bizbench/data/data_embedding"
+DATA_DIR="StructuredReasoning/data"
+OUT_DIR="StructuredReasoning/data/data_embedding"
 
 mkdir -p "${OUT_DIR}"
 

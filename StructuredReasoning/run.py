@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Runner script for BizBench tasks supporting multiple agent methods.
+Runner script for StructuredReasoning tasks supporting multiple agent methods.
 """
 import os
 import json
@@ -14,16 +14,28 @@ from utils.easyhard import convert_domain_results
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="ACE System - BizBench")
+    parser = argparse.ArgumentParser(description="ACE System - StructuredReasoning")
 
     parser.add_argument(
         "--agent_method",
         type=str,
         default="ace",
-        choices=["ace", "cot", "dynamic_cheatsheet", "self_refine", "self-refine", "reflexion", "gepa"],
+        choices=[
+            "ace",
+            "cot",
+            "amem",
+            "dynamic_cheatsheet",
+            "self_refine",
+            "self-refine",
+            "reflexion",
+            "gepa",
+            "debate",
+            "discussion",
+        ],
         help="Agent method to run. 'ace' 为默认流程, 'cot' 是轻量 baseline, "
         "'dynamic_cheatsheet' 启用动态小抄, "
-        "'self_refine' 采用自我反馈迭代，'reflexion' 为自反思改写，'gepa' 为 prompt 演化。",
+        "'self_refine' 采用自我反馈迭代，'reflexion' 为自反思改写，'gepa' 为 prompt 演化，"
+        "'debate' 为正反辩论+裁判汇总，'discussion' 为多专家讨论+主持人汇总。",
     )
     parser.add_argument(
         "--task_name",
@@ -43,7 +55,7 @@ def parse_args():
             "formula",
             "factset",
         ],
-        help="BizBench task to run（run_mode=dataname 时必填，easyhard 时忽略）",
+        help="StructuredReasoning task to run（run_mode=dataname 时必填，easyhard 时忽略）",
     )
     parser.add_argument(
         "--run_mode",
@@ -65,7 +77,7 @@ def parse_args():
     parser.add_argument("--initial_playbook_path", type=str, default=None,
                         help="Optional initial playbook")
     parser.add_argument("--config_path", type=str,
-                        default="./bizbench/data/task_config.json",
+                        default="./StructuredReasoning/data/task_config.json",
                         help="Path to task config JSON")
     parser.add_argument("--save_path", type=str, required=True,
                         help="Directory to save results")
@@ -93,8 +105,8 @@ def parse_args():
     parser.add_argument(
         "--data_embedding_dir",
         type=str,
-        default="bizbench/data/data_embedding",
-        help="Embedding CSV 目录，默认 bizbench/data/data_embedding",
+        default="StructuredReasoning/data/data_embedding",
+        help="Embedding CSV 目录，默认 StructuredReasoning/data/data_embedding",
     )
 
     parser.add_argument("--json_mode", action="store_true")
@@ -272,6 +284,58 @@ def parse_args():
         help="Do not inject previous answers into the cheatsheet context.",
     )
 
+    # Debate specific knobs
+    parser.add_argument(
+        "--debate_rounds",
+        type=int,
+        default=1,
+        help="Debate: 正反交锋轮数（每轮包含 PRO+CON），最后由 JUDGE 给最终答案。",
+    )
+    parser.add_argument(
+        "--debate_pro_temperature",
+        type=float,
+        default=0.0,
+        help="Debate: PRO 侧温度。",
+    )
+    parser.add_argument(
+        "--debate_con_temperature",
+        type=float,
+        default=0.2,
+        help="Debate: CON 侧温度。",
+    )
+    parser.add_argument(
+        "--debate_judge_temperature",
+        type=float,
+        default=0.0,
+        help="Debate: JUDGE 温度。",
+    )
+
+    # Discussion specific knobs
+    parser.add_argument(
+        "--discussion_num_experts",
+        type=int,
+        default=3,
+        help="Discussion: 专家数量（每个专家独立给出方案）。",
+    )
+    parser.add_argument(
+        "--discussion_rounds",
+        type=int,
+        default=1,
+        help="Discussion: 讨论轮数（>1 时专家会看到上一轮其他专家的输出再给新一轮）。",
+    )
+    parser.add_argument(
+        "--discussion_expert_temperature",
+        type=float,
+        default=0.2,
+        help="Discussion: 专家温度。",
+    )
+    parser.add_argument(
+        "--discussion_moderator_temperature",
+        type=float,
+        default=0.0,
+        help="Discussion: 主持人温度。",
+    )
+
     return parser.parse_args()
 
 
@@ -361,7 +425,7 @@ def main():
         args.agent_method = "self_refine"
 
     print(f"\n{'='*60}")
-    print("BizBench Runner")
+    print("StructuredReasoning Runner")
     print(f"{'='*60}")
     print(f"Task: {args.task_name}")
     print(f"Mode: {args.mode.upper().replace('_', ' ')}")
@@ -428,6 +492,25 @@ def main():
             agent_method=args.agent_method,
         )
         cot_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )
+    elif args.agent_method == "amem":
+        from Agents.amem import AMemAgent
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}")
+
+        amem_agent = AMemAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+
+        amem_agent.run(
             mode=args.mode,
             test_samples=test_samples,
             data_processor=data_processor,
@@ -551,6 +634,54 @@ def main():
             config=config,
             train_samples=train_samples,
             val_samples=val_samples,
+        )
+    elif args.agent_method == "debate":
+        from Agents.debate import DebateAgent
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(
+                f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}"
+            )
+
+        debate_agent = DebateAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+            rounds=args.debate_rounds,
+            pro_temperature=args.debate_pro_temperature,
+            con_temperature=args.debate_con_temperature,
+            judge_temperature=args.debate_judge_temperature,
+        )
+        debate_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )
+    elif args.agent_method == "discussion":
+        from Agents.discussion import DiscussionAgent
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(
+                f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}"
+            )
+
+        discussion_agent = DiscussionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+            num_experts=args.discussion_num_experts,
+            rounds=args.discussion_rounds,
+            expert_temperature=args.discussion_expert_temperature,
+            moderator_temperature=args.discussion_moderator_temperature,
+        )
+        discussion_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
         )
     else:
         raise ValueError(f"未知的 agent_method: {args.agent_method}")

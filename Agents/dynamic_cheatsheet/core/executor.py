@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from textwrap import indent
 
-from bizbench.data_processor import exec_python
+from StructuredReasoning.data_processor import exec_python
 
 
 def _run_in_sandbox(code: str, timeout: float = 2.0) -> str:

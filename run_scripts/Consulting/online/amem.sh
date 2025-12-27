@@ -11,15 +11,15 @@ cd "${PROJECT_ROOT}"
 
 # ===== 可按需修改的参数 =====
 
-# 咨询 Case 数据路径（按你自己的实际文件改）
-DATA_PATH="agsm_cases_all.json"
+# 咨询 Case 数据路径（相对于项目根）
+DATA_PATH="Consulting/agsm_cases_all.json"
 
 # 结果保存根目录
 SAVE_DIR="results"
 
 # API provider & 模型
-API_PROVIDER="openai"
-GENERATOR_MODEL="deepseek-v3"   # 或者你的 DeepSeek/GPT-5 模型名
+API_PROVIDER="usd_guiji"
+GENERATOR_MODEL="USD-guiji/deepseek-v3"   # 或者你的 GPT-4.1/DeepSeek 模型名
 
 # 评测模式 & 面试轮数
 MODE="online"                    # 与 bizbench 保持一致：online / eval_only
@@ -48,12 +48,16 @@ echo " MAX_TURNS        = ${MAX_TURNS}"
 echo " ENABLE_JUDGE     = ${ENABLE_JUDGE}"
 echo "==============================================="
 echo
+LOG_FILE="consulting_amem_$(date +%Y%m%d_%H%M%S).log"
 
-python -m Consulting.run \
+nohup python -u -m Consulting.run \
   --data_path "${DATA_PATH}" \
   --api_provider "${API_PROVIDER}" \
   --generator_model "${GENERATOR_MODEL}" \
   --save_dir "${SAVE_DIR}" \
   --mode "${MODE}" \
   --max_turns "${MAX_TURNS}" \
-  ${JUDGE_FLAG}
+  ${JUDGE_FLAG} \
+  >"${LOG_FILE}" 2>&1 &
+
+echo "Started in background with nohup. Log: ${LOG_FILE}"

@@ -13,6 +13,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 
+from utils.consulting_tools import evaluate_consulting_set
 from .core import Generator, Reflector, Curator, BulletpointAnalyzer
 from utils.playbook_utils import *
 from utils.logger import *
@@ -82,6 +83,7 @@ class ACE:
         self.reflector_client = reflector_client
         self.curator_client = curator_client
         self.max_tokens = max_tokens
+        self.temperature = 0.7
         
         # Initialize playbook
         self.agent_method = agent_method
@@ -93,6 +95,170 @@ class ACE:
         self.best_playbook = self.playbook
         # Track global bullet ID
         self.next_global_id = 1
+
+    # ==========================================================
+    # Consulting support (lightweight, no playbook updates)
+    # ==========================================================
+
+    def _call_llm_json(self, system: str, user: str) -> Dict[str, Any]:
+        """
+        Lightweight JSON helper for consulting chat turns.
+        """
+        import json as _json
+
+        resp = self.generator_client.chat.completions.create(
+            model=self.generator.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=self.temperature,
+            max_tokens=min(self.max_tokens, 512),
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text.startswith("{"):
+            i = text.find("{")
+            if i >= 0:
+                text = text[i:]
+        if not text.endswith("}"):
+            j = text.rfind("}")
+            if j >= 0:
+                text = text[: j + 1]
+        try:
+            return _json.loads(text)
+        except Exception:
+            return {}
+
+    def on_case_start(self, case_id: str) -> None:
+        self._current_case_id = case_id
+
+    def on_case_end(
+        self,
+        case_id: str,
+        case_text: str,
+        history: List[Dict[str, str]],
+    ) -> None:
+        _ = (case_id, case_text, history)
+        self._current_case_id = None
+
+    def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        last_interviewer_msg = ""
+        for h in reversed(history):
+            if h.get("role") == "interviewer":
+                last_interviewer_msg = h.get("content", "")
+                break
+
+        transcript_lines = [
+            f"{h.get('role', 'unknown')}: {h.get('content', '')}"
+            for h in history
+        ]
+        transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
+
+        system = (
+            "You are the CANDIDATE in a consulting-style case interview.\n"
+            "You only see the dialogue history, not the hidden case text.\n"
+            "Act like a top-tier consulting candidate: structured, "
+            "hypothesis-driven, quantitative when possible, clear and concise.\n\n"
+            "Respond ONLY with what you would say next as the candidate.\n"
+            'Wrap your answer in a JSON object of the form:\n'
+            '  {\"reply\": \"<your answer>\"}\n'
+            "Do not include any other fields."
+        )
+
+        user_parts = [
+            f"Current case ID: {case_id}",
+            "",
+            "Dialogue so far (Interviewer / Candidate):",
+            transcript_text,
+            "",
+            "Interviewer just said:",
+            last_interviewer_msg or "[no interviewer message found]",
+            "",
+            "Now respond with your next candidate message, wrapped in JSON "
+            'as {\"reply\": \"...\"}.',
+        ]
+        user_prompt = "\n".join(user_parts)
+
+        data = self._call_llm_json(system=system, user=user_prompt)
+        reply = data.get("reply")
+        if not isinstance(reply, str) or not reply.strip():
+            reply = (
+                "Let me outline the key drivers, propose a hypothesis, and the first "
+                "analyses I'd run to validate it."
+            )
+        return reply.strip()
+
+    def run_consulting(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if mode not in ["online", "eval_only"]:
+            raise ValueError(f"Consulting mode must be online/eval_only, got '{mode}'")
+        if not test_samples:
+            raise ValueError("Consulting requires non-empty test_samples")
+
+        save_dir = config.get("save_dir", "results")
+        task_name = config.get("task_name", "Consulting")
+        run_subdir = (
+            f"{task_name}/{self.agent_method}/{mode}/"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        resolved_save_path = os.path.join(save_dir, run_subdir)
+        os.makedirs(resolved_save_path, exist_ok=True)
+
+        print(f"\n{'='*60}")
+        print(f"{self.agent_method.upper()} - CONSULTING EVALUATION")
+        print(f"{'='*60}")
+        print(f"Cases: {len(test_samples)}")
+        print(f"Save dir: {resolved_save_path}")
+        print(f"{'='*60}\n")
+
+        results, error_log = evaluate_consulting_set(
+            agent=self,
+            test_samples=test_samples,
+            config=config,
+            log_dir=resolved_save_path,
+        )
+
+        with open(
+            os.path.join(resolved_save_path, "test_results.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                {"test_results": results, "error_log": error_log},
+                f,
+                indent=2,
+            )
+
+        config_payload = dict(config or {})
+        config_payload.update(
+            {
+                "run_subdir": run_subdir,
+                "resolved_save_path": resolved_save_path,
+            }
+        )
+        with open(
+            os.path.join(resolved_save_path, "run_config.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(config_payload, f, indent=2)
+
+        print(f"\n{'='*60}")
+        print(f"{self.agent_method.upper()} - CONSULTING RUN COMPLETE")
+        print(f"{'='*60}")
+        print(f"Num cases: {results.get('num_cases')}, "
+              f"finished: {results.get('num_finished')}, "
+              f"failed: {results.get('num_failed')}")
+        print(f"Metrics: {results.get('metrics')}")
+        print(f"Results saved to: {resolved_save_path}")
+        print(f"{'='*60}\n")
+
+        return results
     
     def _initialize_empty_playbook(self) -> str:
         """Initialize an empty playbook with standard sections."""
@@ -227,6 +393,15 @@ class ACE:
         config_params = self._extract_config_params(config)
         task_name = config_params['task_name']
         save_dir = config_params['save_dir']
+
+        # Consulting routing
+        if "consult" in str(task_name).lower():
+            return self.run_consulting(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config or {},
+            )
         
         # Setup paths based on mode
         if mode == 'eval_only':

@@ -8,7 +8,7 @@
 用法示例（OpenAI 后端）：
 python tools/generate_embeddings_csv.py \
   --backend openai \
-  --input_jsonl bizbench/data/finer_test.jsonl \
+  --input_jsonl StructuredReasoning/data/finer_test.jsonl \
   --output_csv outputs/finer_embeddings.csv \
   --model text-embedding-3-large \
   --batch_size 32
@@ -17,7 +17,7 @@ python tools/generate_embeddings_csv.py \
 python tools/generate_embeddings_csv.py \
   --backend hf \
   --hf_model BAAI/bge-small-en-v1.5 \
-  --input_jsonl bizbench/data/finer_test.jsonl \
+  --input_jsonl StructuredReasoning/data/finer_test.jsonl \
   --output_csv outputs/finer_embeddings.csv \
   --batch_size 32
 """

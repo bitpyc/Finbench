@@ -245,3 +245,46 @@ score = 0.6 * log1p(文本长度) + 0.4 * 次级复杂度
 - **总样本数**：4,657（Finance Reasoning: 1,324, Span extraction: 2,253, Knowledge understand: 1,080）
 - **实验时间**：2024年12月24日
 
+---
+
+## 7. 基于大模型的“能力-难度”重分类（可选）
+
+如果你认为启发式分级仍不够符合直觉，可以改用大模型对每条样本直接输出：
+**Capability（四类） + Difficulty（Easy/Middle/Hard）**。该流程不会解题，仅做“题目考察能力”的质检式标注。
+
+### 7.1 脚本位置
+
+`utils/llm_reclassify.py`
+
+### 7.2 运行示例（试跑）
+
+下面命令只跑 20 条样本，便于先验证 prompt 与解析是否正常（默认全任务拍平）：
+
+```bash
+cd /data0/yangmin/workplace/ace-main
+python3 utils/llm_reclassify.py \
+  --config_path ./StructuredReasoning/data/task_config.json \
+  --api_provider usd_guiji \
+  --model USD-guiji/deepseek-v3 \
+  --max_samples 20
+```
+
+### 7.3 运行示例（断点续跑）
+
+如果中途被打断，可用 `--resume` 继续：
+
+```bash
+python3 utils/llm_reclassify.py \
+  --config_path ./StructuredReasoning/data/task_config.json \
+  --api_provider usd_guiji \
+  --model USD-guiji/deepseek-v3 \
+  --resume
+```
+
+### 7.4 输出文件
+
+脚本会在 `results/bizbench_run/llm_reclassify_mode/<timestamp>/` 下输出：
+- `classifications.jsonl`：每条样本一行，包含原始 sample + LLM 输出 + 解析后的字段
+- `summary.json`：Capability / Difficulty 的计数汇总
+
+

@@ -8,6 +8,7 @@ import os
 from typing import Any, Dict, List
 
 from Agents.amem.agent import AMemAgent
+from Agents.cot.agent import ChainOfThoughtAgent
 
 
 def load_consulting_cases(data_path: str) -> List[Dict[str, Any]]:
@@ -87,7 +88,7 @@ def load_consulting_cases(data_path: str) -> List[Dict[str, Any]]:
                 "meta": s.get("meta", {}),
             }
         )
-    return normalized[:3]
+    return normalized
 
 
 
@@ -110,6 +111,13 @@ def main():
         type=str,
         default="gpt-5",
         help="LLM model name for the candidate agent.",
+    )
+    parser.add_argument(
+        "--agent_method",
+        type=str,
+        default="amem",
+        choices=["amem", "cot", "self_refine", "reflexion", "debate", "discussion", "dynamic_cheatsheet", "ace", "gepa"],
+        help="Which agent implementation to use.",
     )
     parser.add_argument(
         "--save_dir",
@@ -140,13 +148,88 @@ def main():
     # 1) 加载 / 标准化数据 -> test_samples
     test_samples = load_consulting_cases(args.data_path)
 
-    # 2) 构造统一 AMemAgent（与 BeerGame / BizBench 一致）
-    agent = AMemAgent(
-        api_provider=args.api_provider,
-        generator_model=args.generator_model,
-        max_tokens=1024,
-        agent_method="amem",
-    )
+    # 2) 构造 agent
+    if args.agent_method == "cot":
+        agent = ChainOfThoughtAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="cot",
+        )
+    elif args.agent_method == "self_refine":
+        from Agents.self_refine.agent import SelfRefineAgent
+
+        agent = SelfRefineAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="self_refine",
+        )
+    elif args.agent_method == "reflexion":
+        from Agents.reflexion.agent import ReflexionAgent
+
+        agent = ReflexionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="reflexion",
+        )
+    elif args.agent_method == "debate":
+        from Agents.debate.agent import DebateAgent
+
+        agent = DebateAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="debate",
+        )
+    elif args.agent_method == "discussion":
+        from Agents.discussion.agent import DiscussionAgent
+
+        agent = DiscussionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="discussion",
+        )
+    elif args.agent_method == "dynamic_cheatsheet":
+        from Agents.dynamic_cheatsheet.agent import DynamicCheatsheetAgent
+
+        agent = DynamicCheatsheetAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="dynamic_cheatsheet",
+        )
+    elif args.agent_method == "ace":
+        from Agents.ace.agent import ACE
+
+        agent = ACE(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=args.generator_model,
+            curator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="ace",
+        )
+    elif args.agent_method == "gepa":
+        from Agents.gepa.agent import GEPAAgent, GepaConfig
+
+        agent = GEPAAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="gepa",
+            gepa_config=GepaConfig(),
+        )
+    else:
+        agent = AMemAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=1024,
+            agent_method="amem",
+        )
 
     # 3) 组装 config，让 .run() 路由到 run_consulting
     config: Dict[str, Any] = {

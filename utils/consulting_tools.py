@@ -253,7 +253,7 @@ def _run_single_interview(
     # 为了日志可读性，把结束 token 从文本中拿掉（只保留在元信息里）
     cleaned_history: List[Dict[str, str]] = []
     for turn in history:
-        content = turn.get("content", "")
+        content = str(turn.get("content", ""))
         if INTERVIEW_END_TOKEN in content:
             content = content.replace(INTERVIEW_END_TOKEN, "").strip()
         cleaned_history.append({**turn, "content": content})

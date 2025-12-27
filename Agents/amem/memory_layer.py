@@ -920,7 +920,10 @@ class AgenticMemorySystem:
                 all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
             neighborhood = all_memories[i].links
             for nn in neighborhood:
-                neighbor = int(nn.strip().split(':')[-1])
+                try:
+                    neighbor = int(str(nn).strip().split(':')[-1])
+                except Exception:
+                    continue
                 memory_str += "talk start time:" + all_memories[neighbor].timestamp + "memory content: " + all_memories[
                     neighbor].content + "memory context: " + all_memories[neighbor].context + "memory keywords: " + str(
                     all_memories[neighbor].keywords) + "memory tags: " + str(all_memories[neighbor].tags) + "\n"
