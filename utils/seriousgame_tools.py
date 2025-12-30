@@ -148,7 +148,14 @@ async def _run_one_episode(
     steps: List[Dict[str, Any]] = []
     done = False
     while not done:
-        order_qty = int(policy_fn(obs, {"scenario_id": scenario_id, "episode_id": env_id, "role": role}))
+        decision = policy_fn(obs, {"scenario_id": scenario_id, "episode_id": env_id, "role": role})
+        note = None
+        if isinstance(decision, (tuple, list)) and decision:
+            order_qty = int(decision[0])
+            if len(decision) > 1:
+                note = decision[1]
+        else:
+            order_qty = int(decision)
         if order_qty < 0:
             order_qty = 0
 
@@ -160,6 +167,7 @@ async def _run_one_episode(
         steps.append({
             "obs": obs,
             "action": {"order_qty": order_qty},
+            "note": note,
             "step_out": step_out,
         })
         obs = next_obs
@@ -726,13 +734,19 @@ def beergame_evaluate_run(
 
     scenario_index = ctx.get("scenario_index") or {}
 
-    def policy_fn(obs: Dict[str, Any], step_ctx: Dict[str, Any]) -> int:
+    def policy_fn(obs: Dict[str, Any], step_ctx: Dict[str, Any]):
+        """Wrap agent._decide_order_qty so we can also expose natural-language note.
+
+        Returns either an int (order_qty) or a tuple (order_qty, note).
+        """
         scenario_id = str(step_ctx.get("scenario_id", ""))
         scenario_cfg = scenario_index.get(scenario_id, {}) if isinstance(scenario_index, dict) else {}
         if scenario_cfg and "target_inventory" in scenario_cfg:
             step_ctx = dict(step_ctx)
             step_ctx["target_inventory"] = scenario_cfg["target_inventory"]
-        return int(agent._decide_order_qty(obs, step_ctx))
+        order = int(agent._decide_order_qty(obs, step_ctx))
+        note = getattr(agent, "_last_beergame_note", None)
+        return order, note
 
     results, error_log = evaluate_beergame_set(
         test_samples=test_samples,
@@ -815,18 +829,17 @@ def beergame_render_prompt(
     system = (
         "You are playing one role in the Beer Distribution Game.\n"
         "Your goal is to minimize long-run total cost (inventory + backlog).\n"
-        "You must choose an integer 'order_qty' for the current week.\n"
-        "You may also provide a short 'note' with your reasoning.\n"
-        'Respond strictly in JSON: {"order_qty": <int>, "note": "<str>"}'
     )
 
     lines = [
         f"Role: {role}",
         "Current observation (for this role only):",
         json.dumps(obs, ensure_ascii=False),
-        "",
-        f"A simple baseline suggests order_qty ≈ {int(base_order)}.",
+        "You must choose an integer 'order_qty' for the current week.",
+        "You also need to provide a short 'note' with your reasoning.",
+        'Respond strictly in JSON: {"order_qty": <int>, "note": "<str>"}',
     ]
+    # f"A simple baseline suggests order_qty ≈ {int(base_order)}."
     if retrieved:
         lines += [
             "",
