@@ -17,6 +17,7 @@ This is designed to reduce "table-max" bias and make experience grounded in actu
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -170,6 +171,30 @@ def _safe_str(x: Any, default: str = "NA") -> str:
     s = str(x).strip()
     return s if s else default
 
+def _stable_hash_int(s: str) -> int:
+    """
+    Python's built-in hash() is salted per-process (PYTHONHASHSEED), so it is not stable across runs.
+    We use md5 for a small, stable, deterministic integer hash.
+    """
+    s = str(s or "")
+    h = hashlib.md5(s.encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
+
+def _bullet_sort_key(b: Dict[str, Any]) -> Tuple[str, str, str, str, str, str]:
+    """
+    Provide a deterministic ordering for bullets to make meta sampling reproducible even when
+    bullets are generated/loaded in a non-deterministic order (e.g., parallel extraction).
+    """
+    tags = _bullet_tags(b)
+    return (
+        _safe_str(tags.get("task_name")),
+        _safe_str(tags.get("agent_method") or tags.get("agent")),
+        _safe_str(tags.get("capability")),
+        _safe_str(tags.get("difficulty_bucket")),
+        _safe_str(b.get("outcome")),
+        _safe_str(b.get("bullet")),
+    )
+
 def _meta_group_key(b: Dict[str, Any]) -> Tuple[str, str, str, str]:
     """
     Group bullets for meta synthesis sampling.
@@ -244,6 +269,8 @@ def _sample_meta_bullets(
     """
     if n <= 0:
         return []
+    # Make meta sampling robust to input order (e.g., from parallel extraction / jsonl appends).
+    bullets = sorted(bullets, key=_bullet_sort_key)
     if len(bullets) <= n:
         return bullets
     strategy = (strategy or "stratified").strip().lower()
@@ -265,7 +292,7 @@ def _sample_meta_bullets(
             tags = _bullet_tags(bullets[i])
             cap = _safe_str(tags.get("capability"))
             cap_to_idxs[cap].append(i)
-        caps = list(cap_to_idxs.keys())
+        caps = sorted(cap_to_idxs.keys())
         rng.shuffle(caps)
         if not caps:
             return [bullets[i] for i in idxs_all[:n]]
@@ -433,7 +460,7 @@ def _sample_indices(
     """
     Stratified sampling across (capability, difficulty_bucket, correct/incorrect).
     """
-    rng = random.Random(seed + (hash(task) % 100000) + (hash(agent) % 100000))
+    rng = random.Random(seed + (_stable_hash_int(task) % 100000) + (_stable_hash_int(agent) % 100000))
     groups: Dict[Tuple[str, str, bool], List[int]] = defaultdict(list)
     for i in range(total):
         lab = labels.get(i)
@@ -569,7 +596,7 @@ def main() -> None:
     ap.add_argument(
         "--meta_target_rules",
         type=int,
-        default=25,
+        default=10,
         help="Target number of routing_policy.rules for meta synthesizer to generate (soft target).",
     )
     ap.add_argument(

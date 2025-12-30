@@ -16,11 +16,6 @@ which agent to use for a new sample.
     Therefore, any rule that sets difficulty_bucket to "easy"/"middle"/"hard" under "Information Extraction" will NEVER match.
     For "Information Extraction", you MUST set difficulty_bucket to "ALL" (or omit difficulty_bucket entirely).
 
-## Rule count guidance
-- You will receive `requested_rules` in the user payload with (target/min/max).
-- Try to generate about `requested_rules.target` rules.
-- If evidence is weak, you may generate fewer, but TRY to generate at least `requested_rules.min`.
-- Do not exceed `requested_rules.max`.
 
 ## Output JSON schema (strict)
 {
