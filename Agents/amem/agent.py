@@ -5,10 +5,12 @@ import os
 import re
 import sys
 import time
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from utils.tools import initialize_clients, evaluate_test_set
+from utils.tools import initialize_clients
+from utils.memory_tools import evaluate_test_set
 from utils.seriousgame_tools import evaluate_edt_set
 from utils.consulting_tools import (
     consulting_prepare_run,
@@ -117,6 +119,10 @@ class AMemAgent:
         max_order_qty: int = 5000,
         note_every_n_steps: int = 2,
         summarize_every_n_steps: int = 4,
+        # StructuredReasoning online write-back controls
+        writeback: bool = True,
+        writeback_max_chars_question: int = 1200,
+        writeback_max_chars_context: int = 2000,
     ):
         self.api_provider = api_provider
         self.generator_model = generator_model
@@ -156,6 +162,11 @@ class AMemAgent:
             retrieve_k=self.retrieve_k,
             temperature=self.temperature,
         )
+
+        self.writeback = bool(writeback)
+        self.writeback_max_chars_question = max(200, int(writeback_max_chars_question))
+        self.writeback_max_chars_context = max(200, int(writeback_max_chars_context))
+        self._mem_lock = threading.Lock()
 
     # ==================================================================
     # 公共工具：节流 + LLM JSON 调用
@@ -253,21 +264,8 @@ class AMemAgent:
         )
         data = self._call_llm_json(system=system, user=user)
         reply = consulting_extract_candidate_reply(data)
-
-        self.memory.add(
-            content=consulting_format_memory_note(
-                case_id=case_id,
-                state=state,
-                reply=reply,
-            ),
-            meta={"case_id": case_id, "turn": state.get("turns", 0)},
-        )
         return reply
 
-
-    # ==================================================================
-    # BeerGame 专用：policy_fn + 运行函数
-    # ==================================================================
 
     # ==================================================================
     # EDT 决策
@@ -329,6 +327,10 @@ class AMemAgent:
             max_order_qty=self.max_order_qty,
         )
 
+        # cache latest BeerGame explanation for logging
+        # self._last_beergame_note = note
+        self._last_beergame_note = note
+
         if note:
             self.memory.add(
                 content=beergame_format_memory_note(
@@ -385,6 +387,36 @@ class AMemAgent:
     # ==================================================================
     # BizBench 专用：静态 QA 数据集
     # ==================================================================
+    def add_memory(self, question, context, response, target, is_correct, call_id):
+        q_short = (question or "").strip()
+        c_short = (context or "").strip()
+        if len(q_short) > self.writeback_max_chars_question:
+            q_short = q_short[: self.writeback_max_chars_question] + "…"
+        if len(c_short) > self.writeback_max_chars_context:
+            c_short = c_short[: self.writeback_max_chars_context] + "…"
+        note_lines = [
+            f"[StructuredReasoning]",
+            "Question:",
+            q_short or "(empty)",
+            "",
+            "Context:",
+            c_short or "(empty)",
+            "",
+            "Your Answer:",
+            str(response).strip(),
+            "",
+            "Ground Truth Answer:",
+            str(target).strip(),
+            "",
+            f"You answer is considered {'correct' if is_correct else 'incorrect'}.",
+        ]
+        note = "\n".join(note_lines).strip()
+        meta = {
+            "type": "structured_reasoning_qa",
+            "call_id": call_id,
+        }
+        with self._mem_lock:
+            self.memory.add(note, meta=meta)
 
     def run_bizbench(
         self,
@@ -427,6 +459,7 @@ class AMemAgent:
         print(f"{'='*60}\n")
 
         results, error_log = evaluate_test_set(
+            agent=self,
             data_processor=data_processor,
             generator=self.bizbench_generator,
             playbook="",
@@ -435,6 +468,8 @@ class AMemAgent:
             log_dir=log_dir,
             max_workers=config.get("test_workers", 20),
             use_json_mode=config.get("json_mode", False),
+            mode=mode,
+            batch_size=int(config.get("batch_size", 20)),
         )
 
         with open(
