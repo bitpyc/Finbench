@@ -21,7 +21,7 @@ SAVE_DIR="results"
 
 python -m SeriousGame.run_edt \
   --mode eval_only \
-  --agent_method amem \
+  --agent_method cot \
   --api_provider openai \
   --generator_model deepseek-v3 \
   --max_tokens 4096 \

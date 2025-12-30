@@ -9,8 +9,6 @@
 # If you cloned the official tutorial repo, a typical value is:
 #   <bptk_py_tutorial-master>/model_library/enterprise_digital_twin
 #
-# Example:
-#   ./run_scripts/SeriousGame/edt/amem.sh --bptk_repo_root /path/to/bptk_py_tutorial-master/model_library/enterprise_digital_twin
 
 set -e
 
@@ -21,7 +19,7 @@ SAVE_DIR="results"
 
 python -m SeriousGame.run_edt \
   --mode eval_only \
-  --agent_method amem \
+  --agent_method mem0 \
   --api_provider openai \
   --generator_model deepseek-v3 \
   --max_tokens 4096 \
