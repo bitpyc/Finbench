@@ -25,7 +25,6 @@ import os
 from datetime import datetime
 
 from .edt_data_processor import EDTDataProcessor
-from Agents.amem.agent import AMemAgent
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +32,13 @@ def parse_args() -> argparse.Namespace:
 
     # common
     p.add_argument("--mode", type=str, default="eval_only", choices=["online", "eval_only"])
-    p.add_argument("--agent_method", type=str, default="amem", choices=["amem"], help="Agent method")
+    p.add_argument(
+        "--agent_method",
+        type=str,
+        default="amem",
+        choices=["amem", "cot", "ace", "mem0"],
+        help="Agent method",
+    )
     p.add_argument(
         "--api_provider",
         type=str,
@@ -101,6 +106,36 @@ def parse_args() -> argparse.Namespace:
         "--keep_temp_bptk_repo",
         action="store_true",
         help="Keep temporary generated BPTK repo roots (for debugging).",
+    )
+
+    p.add_argument(
+        "--reflector_model",
+        type=str,
+        default=None,
+        help="ACE only: reflector model name; defaults to generator_model if not set.",
+    )
+    p.add_argument(
+        "--curator_model",
+        type=str,
+        default=None,
+        help="ACE only: curator model name; defaults to generator_model if not set.",
+    )
+    p.add_argument(
+        "--initial_playbook_path",
+        type=str,
+        default=None,
+        help="ACE only: optional path to an initial playbook file.",
+    )
+    p.add_argument(
+        "--use_bulletpoint_analyzer",
+        action="store_true",
+        help="ACE only: enable bulletpoint analyzer.",
+    )
+    p.add_argument(
+        "--bulletpoint_analyzer_threshold",
+        type=float,
+        default=0.90,
+        help="ACE only: confidence threshold for bulletpoint analyzer.",
     )
 
     return p.parse_args()
@@ -194,14 +229,62 @@ def main() -> None:
     }
 
     if args.agent_method == "amem":
+        from Agents.amem import AMemAgent
+
         agent = AMemAgent(
             api_provider=args.api_provider,
             generator_model=args.generator_model,
             max_tokens=args.max_tokens,
             agent_method=args.agent_method,
         )
+    elif args.agent_method == "cot":
+        from Agents.cot import ChainOfThoughtAgent
+
+        agent = ChainOfThoughtAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "ace":
+        from Agents.ace.agent import ACE
+
+        reflector_model = args.reflector_model or args.generator_model
+        curator_model = args.curator_model or args.generator_model
+
+        initial_playbook = None
+        if args.initial_playbook_path and os.path.exists(args.initial_playbook_path):
+            with open(args.initial_playbook_path, "r", encoding="utf-8") as f:
+                initial_playbook = f.read()
+            print(f"[ACE] Loaded initial playbook from {args.initial_playbook_path}")
+        elif args.initial_playbook_path:
+            print(
+                f"[ACE][WARN] initial_playbook_path '{args.initial_playbook_path}' "
+                "not found. Using empty playbook."
+            )
+
+        agent = ACE(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=reflector_model,
+            curator_model=curator_model,
+            max_tokens=args.max_tokens,
+            initial_playbook=initial_playbook,
+            use_bulletpoint_analyzer=args.use_bulletpoint_analyzer,
+            bulletpoint_analyzer_threshold=args.bulletpoint_analyzer_threshold,
+            agent_method="ace",
+        )
+    elif args.agent_method == "mem0":
+        from Agents.mem0.agent import Mem0Agent
+
+        agent = Mem0Agent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
     else:
-        raise ValueError(f"Unsupported agent_method: {args.agent_method}")
+        raise ValueError(f"Unsupported agent_method '{args.agent_method}' for EDT.")
 
     agent.run(
         mode=args.mode,
