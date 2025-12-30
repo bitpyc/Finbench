@@ -7,8 +7,6 @@ import json
 import os
 from typing import Any, Dict, List
 
-from Agents.amem.agent import AMemAgent
-
 
 def load_consulting_cases(data_path: str) -> List[Dict[str, Any]]:
     """
@@ -87,8 +85,8 @@ def load_consulting_cases(data_path: str) -> List[Dict[str, Any]]:
                 "meta": s.get("meta", {}),
             }
         )
+    # 目前仍然只取前 3 个样本，如需全量评测可去掉 [:3]
     return normalized[:3]
-
 
 
 def main():
@@ -135,18 +133,116 @@ def main():
         action="store_true",
         help="If set, run LLM judge to score each interview.",
     )
+    parser.add_argument(
+        "--agent_method",
+        type=str,
+        default="amem",
+        choices=["amem", "ace", "cot", "mem0"],
+        help="Agent method to use for consulting evaluation.",
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=4096,
+        help="Max tokens for candidate LLM (amem / cot / mem0).",
+    )
+    # ACE-specific knobs (对 AMem / CoT / Mem0 无影响)
+    parser.add_argument(
+        "--reflector_model",
+        type=str,
+        default=None,
+        help="ACE only: reflector model name. Defaults to generator_model if not set.",
+    )
+    parser.add_argument(
+        "--curator_model",
+        type=str,
+        default=None,
+        help="ACE only: curator model name. Defaults to generator_model if not set.",
+    )
+    parser.add_argument(
+        "--initial_playbook_path",
+        type=str,
+        default=None,
+        help="ACE only: optional path to an initial playbook file.",
+    )
+    parser.add_argument(
+        "--use_bulletpoint_analyzer",
+        action="store_true",
+        help="ACE only: enable bulletpoint analyzer.",
+    )
+    parser.add_argument(
+        "--bulletpoint_analyzer_threshold",
+        type=float,
+        default=0.90,
+        help="ACE only: confidence threshold for bulletpoint analyzer.",
+    )
     args = parser.parse_args()
 
     # 1) 加载 / 标准化数据 -> test_samples
     test_samples = load_consulting_cases(args.data_path)
 
-    # 2) 构造统一 AMemAgent（与 BeerGame / BizBench 一致）
-    agent = AMemAgent(
-        api_provider=args.api_provider,
-        generator_model=args.generator_model,
-        max_tokens=1024,
-        agent_method="amem",
-    )
+    # 2) 根据 agent_method 构造对应 Agent
+    if args.agent_method == "cot":
+        from Agents.cot import ChainOfThoughtAgent
+
+        agent = ChainOfThoughtAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+
+    elif args.agent_method == "amem":
+        from Agents.amem import AMemAgent
+
+        agent = AMemAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="amem",
+        )
+
+    elif args.agent_method == "mem0":
+        from Agents.mem0.agent import Mem0Agent
+
+        agent = Mem0Agent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="mem0",
+        )
+
+    elif args.agent_method == "ace":
+        from Agents.ace import ACE
+
+        reflector_model = args.reflector_model or args.generator_model
+        curator_model = args.curator_model or args.generator_model
+
+        initial_playbook = None
+        if args.initial_playbook_path:
+            if os.path.exists(args.initial_playbook_path):
+                with open(args.initial_playbook_path, "r", encoding="utf-8") as f:
+                    initial_playbook = f.read()
+                print(f"[ACE] Loaded initial playbook from {args.initial_playbook_path}")
+            else:
+                print(
+                    f"[ACE] Warning: initial_playbook_path '{args.initial_playbook_path}' "
+                    "not found; using empty playbook.\n"
+                )
+
+        agent = ACE(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=reflector_model,
+            curator_model=curator_model,
+            max_tokens=1024,
+            initial_playbook=initial_playbook,
+            use_bulletpoint_analyzer=args.use_bulletpoint_analyzer,
+            bulletpoint_analyzer_threshold=args.bulletpoint_analyzer_threshold,
+            agent_method="ace",
+        )
+    else:
+        raise ValueError(f"Unsupported agent_method '{args.agent_method}' for Consulting.")
 
     # 3) 组装 config，让 .run() 路由到 run_consulting
     config: Dict[str, Any] = {
