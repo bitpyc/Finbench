@@ -9,8 +9,8 @@ AGENT_METHOD="mem0"
 MODE="eval_only"                              # 对应 run_beergame.py 的 --mode
 
 # LLM / Agent 相关
-API_PROVIDER="openai"                         # openai / sambanova / together / usd_guiji
-GENERATOR_MODEL="deepseek-v3"                       # 对应 --generator_model
+API_PROVIDER="usd_guiji"                      # openai / sambanova / together / usd_guiji
+GENERATOR_MODEL="USD-guiji/deepseek-v3"       # 对应 --generator_model
 MAX_TOKENS=512
 
 # 结果保存

@@ -32,14 +32,25 @@ def parse_args():
         "--agent_method",
         type=str,
         default="amem",
-        choices=["amem", "cot", "ace", "mem0"],
+        choices=[
+            "amem",
+            "cot",
+            "ace",
+            "mem0",
+            "debate",
+            "discussion",
+            "reflexion",
+            "self_refine",
+            "dynamic_cheatsheet",
+            "gepa",
+        ],
         help="Agent method to run",
     )
     parser.add_argument(
         "--api_provider",
         type=str,
         default="openai",
-        choices=["openai", "deepseek", "together", "sambanova"],
+        choices=["openai", "deepseek", "together", "sambanova", "usd_guiji"],
         help="LLM API provider",
     )
     parser.add_argument(
@@ -197,6 +208,61 @@ def main():
         agent = Mem0Agent(
             api_provider=args.api_provider,
             generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "debate":
+        from Agents.debate.agent import DebateAgent
+
+        agent = DebateAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "discussion":
+        from Agents.discussion.agent import DiscussionAgent
+
+        agent = DiscussionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "reflexion":
+        from Agents.reflexion.agent import ReflexionAgent
+
+        agent = ReflexionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "self_refine":
+        from Agents.self_refine.agent import SelfRefineAgent
+
+        agent = SelfRefineAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "dynamic_cheatsheet":
+        from Agents.dynamic_cheatsheet.agent import DynamicCheatsheetAgent
+
+        agent = DynamicCheatsheetAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "gepa":
+        from Agents.gepa.agent import GEPAAgent
+
+        agent = GEPAAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=args.generator_model,
             max_tokens=args.max_tokens,
             agent_method=args.agent_method,
         )

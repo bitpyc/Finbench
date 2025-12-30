@@ -10,6 +10,15 @@ from dataclasses import replace
 from utils.consulting_tools import evaluate_consulting_set
 from utils.tools import extract_answer, initialize_clients
 from utils.llm import timed_llm_call
+from utils.seriousgame_tools import (
+    beergame_prepare_run,
+    beergame_evaluate_run,
+    beergame_save_run,
+    beergame_build_query,
+    beergame_base_rule_order,
+    beergame_render_prompt,
+    beergame_extract_order_and_note,
+)
 
 from .config import GepaConfig
 from .core import GepaResult, _build_query, run_gepa
@@ -206,6 +215,82 @@ class GEPAAgent:
             )
         return reply.strip()
 
+    # ==========================================================
+    # BeerGame: decision hook + evaluation entry (无记忆版)
+    # ==========================================================
+    def _decide_order_qty(self, obs: Dict[str, Any], ctx: Dict[str, Any]) -> int:
+        """
+        BeerGame 单步决策，与 CoT 基线一致（不使用记忆）。
+        """
+        role = str(ctx.get("role", obs.get("role", "retailer")))
+        max_order_qty = int(getattr(self, "max_order_qty", 5000))
+
+        _ = beergame_build_query(obs)  # 预留日志/扩展
+
+        base_order = beergame_base_rule_order(
+            obs=obs,
+            ctx=ctx,
+            max_order_qty=max_order_qty,
+        )
+
+        system, user = beergame_render_prompt(
+            role=role,
+            obs=obs,
+            retrieved="",  # GEPA 版本无记忆
+            base_order=base_order,
+        )
+
+        user = (
+            user
+            + "\n\nThink step-by-step privately to choose the best order quantity. "
+            "Do NOT reveal your chain-of-thought. Output ONLY JSON."
+        )
+
+        js = self._call_llm_json(system=system, user=user)
+        order_qty, note = beergame_extract_order_and_note(
+            js=js,
+            base_order=base_order,
+            max_order_qty=max_order_qty,
+        )
+        self._last_beergame_note = note
+        return int(order_qty)
+
+    def run_beergame(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """BeerGame 评测入口（委托 seriousgame_tools 通用流程）。"""
+        _ = data_processor
+
+        beergame_cfg = dict(config.get("beergame", {}) or {})
+        self.max_order_qty = int(
+            beergame_cfg.get("max_order_qty", config.get("max_order_qty", 5000))
+        )
+
+        ctx = beergame_prepare_run(
+            mode=mode,
+            test_samples=test_samples,
+            config=config,
+            allowed_modes=self.SUPPORTED_MODES,
+            agent_method=self.agent_method,
+        )
+        results, error_log = beergame_evaluate_run(
+            agent=self,
+            test_samples=test_samples,
+            config=config,
+            ctx=ctx,
+        )
+        beergame_save_run(
+            results=results,
+            error_log=error_log,
+            config=config,
+            ctx=ctx,
+        )
+        return results
+
     def run_consulting(
         self,
         mode: str,
@@ -297,7 +382,15 @@ class GEPAAgent:
             raise ValueError(f"{self.agent_method.upper()} offline 需要 train_samples 与 val_samples")
 
         task_name = config.get("task_name", "unknown_task")
-        if "consult" in str(task_name).lower():
+        name_lower = str(task_name).lower()
+        if "beer" in name_lower:
+            return self.run_beergame(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config,
+            )
+        if "consult" in name_lower:
             return self.run_consulting(
                 mode=mode,
                 test_samples=test_samples or [],

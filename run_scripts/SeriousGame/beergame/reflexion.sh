@@ -5,7 +5,7 @@ set -euo pipefail
 BENCHMARK_MODULE="SeriousGame.run_beergame"   # 对应 python -m SeriousGame.run_beergame
 BENCHMARK_NAME="SeriousGame"
 TASK_NAME="BeerGame"
-AGENT_METHOD="ace"
+AGENT_METHOD="reflexion"
 MODE="eval_only"                              # 对应 run_beergame.py 的 --mode
 
 # LLM / Agent 相关
@@ -34,3 +34,4 @@ nohup python -u -m "${BENCHMARK_MODULE}" \
   --mcp_timeout_sec "${MCP_TIMEOUT_SEC}" \
   "$@" \
   > "${LOG_NAME}" 2>&1 &
+

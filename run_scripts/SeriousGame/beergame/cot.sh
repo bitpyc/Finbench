@@ -9,8 +9,8 @@ AGENT_METHOD="cot"
 MODE="eval_only"                              # 对应 run_beergame.py 的 --mode
 
 # LLM / Agent 相关
-API_PROVIDER="openai"                         # openai / sambanova / together / usd_guiji
-GENERATOR_MODEL="deepseek-v3"                       # 对应 --generator_model
+API_PROVIDER="usd_guiji"                      # openai / sambanova / together / usd_guiji
+GENERATOR_MODEL="USD-guiji/deepseek-v3"       # 对应 --generator_model
 MAX_TOKENS=512
 
 # 结果保存
@@ -23,7 +23,7 @@ MCP_TIMEOUT_SEC=60
 
 echo "Starting ${TASK_NAME} ${MODE} ${AGENT_METHOD} run. Logs: ${LOG_NAME}"
 
-nohup python -m "${BENCHMARK_MODULE}" \
+nohup python -u -m "${BENCHMARK_MODULE}" \
   --mode "${MODE}" \
   --agent_method "${AGENT_METHOD}" \
   --api_provider "${API_PROVIDER}" \

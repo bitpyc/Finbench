@@ -8,7 +8,8 @@ import json
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 
-from openai import OpenAI
+from utils.llm import timed_llm_call
+from utils.tools import initialize_clients
 
 
 # ============ 面试官配置 ============
@@ -35,22 +36,18 @@ Keep your tone professional, concise, and focused on the case. Ask one or a smal
 """
 
 INTERVIEWER_MODEL = os.getenv("INTERVIEWER_MODEL", "gpt-5")
+INTERVIEWER_PROVIDER = os.getenv("INTERVIEWER_PROVIDER", "openai")
 INTERVIEWER_END_TOKEN = "<<<INTERVIEW_OVER>>>"
 
-_interviewer_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-)
+_interviewer_client, _, _ = initialize_clients(INTERVIEWER_PROVIDER)
 
 # =======================
 # 评测用 Judge 模型配置
 # =======================
 
 JUDGE_MODEL = os.getenv("JUDGE_MODEL", "gpt-5")
-_judge_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
-)
+JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", "openai")
+_judge_client, _, _ = initialize_clients(JUDGE_PROVIDER)
 
 JUDGE_SYSTEM_PROMPT = """
 You are an expert evaluator of consulting-style case interviews. 
@@ -171,16 +168,22 @@ def call_judge_llm(
         "Please evaluate the candidate strictly following your instructions and output JSON only."
     )
 
-    response = _interviewer_client.chat.completions.create(
+    resp, _ = timed_llm_call(
+        client=_judge_client,
+        api_provider=JUDGE_PROVIDER,
         model=model,
-        temperature=0.2,   # 评测尽量稳定
+        prompt="",
+        role="judge",
+        call_id="judge",
         max_tokens=512,
+        use_json_mode=False,
+        temperature=0.2,  # 评测尽量稳定
         messages=[
             {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
     )
-    raw = response.choices[0].message.content.strip()
+    raw = resp.strip()
 
     # 解析 JSON，防止偶尔不合法
     try:
@@ -212,9 +215,16 @@ def call_interviewer_llm(
     temperature: float = 0.3,
     max_tokens: int = 512,
 ) -> str:
-    """调用固定的面试官 LLM"""
-    resp = _interviewer_client.chat.completions.create(
+    """调用固定的面试官 LLM（统一走 utils.llm）。"""
+    resp, _ = timed_llm_call(
+        client=_interviewer_client,
+        api_provider=INTERVIEWER_PROVIDER,
         model=model,
+        prompt="",
+        role="interviewer",
+        call_id="interviewer",
+        max_tokens=max_tokens,
+        use_json_mode=False,
         temperature=temperature,
         max_tokens=max_tokens,
         messages=[
@@ -222,7 +232,7 @@ def call_interviewer_llm(
             {"role": "user", "content": user_content},
         ],
     )
-    return resp.choices[0].message.content.strip()
+    return resp.strip()
 
 
 def save_interview_states_to_json(states: List[InterviewState], filepath: str):
