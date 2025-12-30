@@ -14,6 +14,21 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 
 from utils.consulting_tools import evaluate_consulting_set
+from utils.seriousgame_tools import (
+    beergame_prepare_run,
+    beergame_evaluate_run,
+    beergame_save_run,
+    beergame_base_rule_order,
+    beergame_render_prompt,
+    beergame_extract_order_and_note,
+    edt_prepare_run,
+    edt_evaluate_run,
+    edt_save_run,
+    render_edt_prompt,
+    build_edt_decision_context,
+    normalize_edt_schema,
+)
+
 from .core import Generator, Reflector, Curator, BulletpointAnalyzer
 from utils.playbook_utils import *
 from utils.logger import *
@@ -84,6 +99,22 @@ class ACE:
         self.curator_client = curator_client
         self.max_tokens = max_tokens
         self.temperature = 0.7
+        self.max_order_qty = 5000
+        self.SUPPORTED_MODES = {"online", "eval_only"}
+
+        # Consulting-specific runtime state
+        self.consulting_mode: Optional[str] = None
+        self._current_case_id: Optional[str] = None
+        self.consulting_cases_since_curate: int = 0
+        # how many cases between curator updates (will be configurable later)
+        self.consulting_curator_frequency: int = 1
+        # buffer of recent reflections (to be used in later steps)
+        self.consulting_pending_reflections: List[str] = []
+        # log dir for consulting LLM calls
+        self._consulting_log_dir: Optional[str] = None
+        # cached config for consulting reflection/curation
+        self._consulting_token_budget: int = 80000
+        self._consulting_total_samples: int = 0
         
         # Initialize playbook
         self.agent_method = agent_method
@@ -130,18 +161,133 @@ class ACE:
             return {}
 
     def on_case_start(self, case_id: str) -> None:
+        """Hook called at the beginning of each consulting case."""
         self._current_case_id = case_id
 
     def on_case_end(
-        self,
-        case_id: str,
-        case_text: str,
-        history: List[Dict[str, str]],
+            self,
+            case_id: str,
+            case_text: str,
+            history: List[Dict[str, str]],
     ) -> None:
-        _ = (case_id, case_text, history)
+        """Hook called at the end of each consulting case.
+
+        In online mode this triggers reflection + (periodic) curation so that
+        the consulting playbook can evolve over cases.
+        """
         self._current_case_id = None
 
-    def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        # Only update playbook in online mode
+        if self.consulting_mode != "online":
+            return
+
+        log_dir = getattr(self, "_consulting_log_dir", None) or "."
+
+        # ----- 构造给 Reflector 的输入 -----
+        # 1) 用 case_text 作为 question（可认为是 case 描述）
+        question_for_reflection = case_text or f"Consulting case {case_id}"
+
+        # 2) 整个对话作为 reasoning_trace
+        transcript_lines = [
+            f"{h.get('role', 'unknown')}: {h.get('content', '')}"
+            for h in history
+        ]
+        reasoning_trace = "\n".join(transcript_lines) or "[no dialogue]"
+
+        # 3) 找最后一条 candidate/assistant 消息，作为 predicted_answer
+        predicted_answer = ""
+        for h in reversed(history):
+            role = h.get("role")
+            if role in ("candidate", "assistant"):
+                predicted_answer = h.get("content", "")
+                break
+        if not predicted_answer:
+            predicted_answer = "[no candidate answer captured]"
+
+        environment_feedback = (
+            "Consulting case finished. Extract better structures, heuristics, "
+            "and common mistakes for future cases."
+        )
+
+        # 对于 consulting，目前不追踪 per-turn bullet usage
+        playbook_bullets: List[str] = []
+
+        # ----- 调 Reflector 生成反思内容 -----
+        reflection_content, bullet_tags, _ = self.reflector.reflect(
+            question=question_for_reflection,
+            reasoning_trace=reasoning_trace,
+            predicted_answer=predicted_answer,
+            ground_truth=None,
+            environment_feedback=environment_feedback,
+            bullets_used=playbook_bullets,
+            use_ground_truth=False,
+            use_json_mode=False,
+            call_id=f"consult_case_{case_id}_reflect",
+            log_dir=log_dir,
+        )
+
+        if reflection_content and isinstance(reflection_content, str):
+            self.consulting_pending_reflections.append(reflection_content)
+
+        # 更新 bullet 使用计数（和 StructuredReasoning 一致）
+        if bullet_tags:
+            self.playbook = update_bullet_counts(self.playbook, bullet_tags)
+
+        self.consulting_cases_since_curate += 1
+
+        # ----- 根据频率调用 Curator -----
+        freq = max(int(getattr(self, "consulting_curator_frequency", 1)), 1)
+        if self.consulting_cases_since_curate >= freq:
+            merged_reflection = "\n\n".join(self.consulting_pending_reflections)
+            stats = get_playbook_stats(self.playbook)
+
+            token_budget = getattr(self, "_consulting_token_budget", 80000)
+            total_samples = getattr(
+                self, "_consulting_total_samples", self.consulting_cases_since_curate
+            )
+
+            self.playbook, self.next_global_id, operations, _ = self.curator.curate(
+                current_playbook=self.playbook,
+                recent_reflection=merged_reflection,
+                question_context=case_text or "",
+                current_step=self.consulting_cases_since_curate,
+                total_samples=total_samples,
+                token_budget=token_budget,
+                playbook_stats=stats,
+                use_ground_truth=False,
+                use_json_mode=False,
+                call_id=f"consult_curate_case_{case_id}",
+                log_dir=log_dir,
+                next_global_id=self.next_global_id,
+            )
+
+            # 可选：再跑一下 BulletpointAnalyzer
+            if self.use_bulletpoint_analyzer and self.bulletpoint_analyzer:
+                print(
+                    f"  Running BulletpointAnalyzer "
+                    f"(threshold={self.bulletpoint_analyzer_threshold})..."
+                )
+                self.playbook = self.bulletpoint_analyzer.analyze(
+                    playbook=self.playbook,
+                    threshold=self.bulletpoint_analyzer_threshold,
+                    merge=True,
+                )
+
+            # 重置 case 计数和缓存
+            self.consulting_cases_since_curate = 0
+            self.consulting_pending_reflections = []
+
+    def _render_consulting_candidate_prompt(
+        self,
+        case_id: str,
+        history: List[Dict[str, str]],
+    ) -> Tuple[str, str]:
+        """Build (question, context) for Generator in consulting.
+
+        question: high-level task description + latest interviewer question
+        context: full dialogue transcript so far
+        """
+        # Last interviewer message
         last_interviewer_msg = ""
         for h in reversed(history):
             if h.get("role") == "interviewer":
@@ -154,51 +300,77 @@ class ACE:
         ]
         transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
 
-        system = (
-            "You are the CANDIDATE in a consulting-style case interview.\n"
-            "You only see the dialogue history, not the hidden case text.\n"
-            "Act like a top-tier consulting candidate: structured, "
-            "hypothesis-driven, quantitative when possible, clear and concise.\n\n"
-            "Respond ONLY with what you would say next as the candidate.\n"
-            'Wrap your answer in a JSON object of the form:\n'
-            '  {\"reply\": \"<your answer>\"}\n'
-            "Do not include any other fields."
-        )
-
-        user_parts = [
-            f"Current case ID: {case_id}",
+        question_parts = [
+            f"[CONSULTING CASE] case_id={case_id}",
             "",
-            "Dialogue so far (Interviewer / Candidate):",
-            transcript_text,
+            "You are the CANDIDATE in a consulting-style case interview.",
+            "Act like a top-tier consulting candidate: structured, hypothesis-driven,",
+            "quantitative when possible, and clearly communicate your thinking.",
             "",
-            "Interviewer just said:",
+            "The interviewer has just said:",
             last_interviewer_msg or "[no interviewer message found]",
             "",
-            "Now respond with your next candidate message, wrapped in JSON "
-            'as {\"reply\": \"...\"}.',
+            "Respond with what you would say next as the candidate in this dialogue.",
         ]
-        user_prompt = "\n".join(user_parts)
+        question = "\n".join(question_parts)
 
-        data = self._call_llm_json(system=system, user=user_prompt)
-        reply = data.get("reply")
-        if not isinstance(reply, str) or not reply.strip():
+        context = "Dialogue so far:\n" + transcript_text
+        return question, context
+
+    def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        """Consulting turn: generate next candidate reply using full Generator.
+
+        This version conditions on the current playbook and uses the same
+        Generator pipeline as StructuredReasoning, so consulting can
+        benefit from accumulated playbook knowledge.
+        """
+        # Build question/context for Generator
+        question, context = self._render_consulting_candidate_prompt(case_id, history)
+
+        # Decide log dir for this call
+        log_dir = getattr(self, "_consulting_log_dir", None) or "."
+
+        # 我们在 consulting 里不启用 JSON mode，只要自然语言回答
+        gen_response, bullet_ids, call_info = self.generator.generate(
+            question=question,
+            playbook=self.playbook,
+            context=context,
+            reflection="(empty)",
+            use_json_mode=False,
+            call_id=f"consult_case_{case_id}_turn_{len(history)}",
+            log_dir=log_dir,
+        )
+
+        reply = (gen_response or "").strip()
+        if not reply:
             reply = (
                 "Let me outline the key drivers, propose a hypothesis, and the first "
                 "analyses I'd run to validate it."
             )
-        return reply.strip()
+        return reply
 
     def run_consulting(
-        self,
-        mode: str,
-        test_samples: List[Dict[str, Any]],
-        data_processor: Any,
-        config: Dict[str, Any],
+            self,
+            mode: str,
+            test_samples: List[Dict[str, Any]],
+            data_processor: Any,
+            config: Dict[str, Any],
     ) -> Dict[str, Any]:
         if mode not in ["online", "eval_only"]:
             raise ValueError(f"Consulting mode must be online/eval_only, got '{mode}'")
         if not test_samples:
             raise ValueError("Consulting requires non-empty test_samples")
+
+        # Record consulting mode & reset per-run state
+        self.consulting_mode = mode
+        self.consulting_cases_since_curate = 0
+        self.consulting_pending_reflections = []
+        self._consulting_total_samples = len(test_samples)
+
+        # 从 config 提取通用参数，主要是 curator 频率和 token_budget
+        config_params = self._extract_config_params(config)
+        self.consulting_curator_frequency = config_params["curator_frequency"]
+        self._consulting_token_budget = config_params["token_budget"]
 
         save_dir = config.get("save_dir", "results")
         task_name = config.get("task_name", "Consulting")
@@ -209,12 +381,27 @@ class ACE:
         resolved_save_path = os.path.join(save_dir, run_subdir)
         os.makedirs(resolved_save_path, exist_ok=True)
 
-        print(f"\n{'='*60}")
+        # Dedicated log dir for consulting LLM calls
+        self._consulting_log_dir = os.path.join(resolved_save_path, "detailed_llm_logs")
+        os.makedirs(self._consulting_log_dir, exist_ok=True)
+
+        print(f"\n{'=' * 60}")
         print(f"{self.agent_method.upper()} - CONSULTING EVALUATION")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Cases: {len(test_samples)}")
         print(f"Save dir: {resolved_save_path}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
+
+        # Save initial playbook snapshot before any consulting interaction
+        try:
+            with open(
+                    os.path.join(resolved_save_path, "initial_playbook.md"),
+                    "w",
+                    encoding="utf-8",
+            ) as f:
+                f.write(self.playbook)
+        except Exception:
+            pass
 
         results, error_log = evaluate_consulting_set(
             agent=self,
@@ -224,15 +411,26 @@ class ACE:
         )
 
         with open(
-            os.path.join(resolved_save_path, "test_results.json"),
-            "w",
-            encoding="utf-8",
+                os.path.join(resolved_save_path, "test_results.json"),
+                "w",
+                encoding="utf-8",
         ) as f:
             json.dump(
                 {"test_results": results, "error_log": error_log},
                 f,
                 indent=2,
             )
+
+        # Save final playbook after this consulting run (may differ in online mode)
+        try:
+            with open(
+                    os.path.join(resolved_save_path, "final_playbook.md"),
+                    "w",
+                    encoding="utf-8",
+            ) as f:
+                f.write(self.playbook)
+        except Exception:
+            pass
 
         config_payload = dict(config or {})
         config_payload.update(
@@ -242,22 +440,189 @@ class ACE:
             }
         )
         with open(
-            os.path.join(resolved_save_path, "run_config.json"),
-            "w",
-            encoding="utf-8",
+                os.path.join(resolved_save_path, "run_config.json"),
+                "w",
+                encoding="utf-8",
         ) as f:
             json.dump(config_payload, f, indent=2)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"{self.agent_method.upper()} - CONSULTING RUN COMPLETE")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Num cases: {results.get('num_cases')}, "
               f"finished: {results.get('num_finished')}, "
               f"failed: {results.get('num_failed')}")
         print(f"Metrics: {results.get('metrics')}")
         print(f"Results saved to: {resolved_save_path}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
+        return results
+
+    # ==========================================================
+    # BeerGame support (SeriousGame) - policy + run wrapper
+    # ==========================================================
+
+    def _decide_order_qty(self, obs: Dict[str, Any], ctx: Dict[str, Any]) -> int:
+        """
+        Single-step BeerGame decision.
+
+        This implementation:
+        - uses task-specific helpers from utils.seriousgame_tools
+        - does NOT use ACE playbook / memory (pure policy from observation)
+        """
+        role = str(ctx.get("role", obs.get("role", "retailer")))
+
+        # Baseline order from simple rule
+        base_order = beergame_base_rule_order(
+            obs=obs,
+            ctx=ctx,
+            max_order_qty=getattr(self, "max_order_qty", 5000),
+        )
+
+        # No retrieval / external memory for ACE BeerGame at the moment
+        retrieved = ""
+
+        system, user = beergame_render_prompt(
+            role=role,
+            obs=obs,
+            retrieved=retrieved,
+            base_order=base_order,
+        )
+
+        js = self._call_llm_json(system=system, user=user)
+        order_qty, note = beergame_extract_order_and_note(
+            js=js,
+            base_order=base_order,
+            max_order_qty=getattr(self, "max_order_qty", 5000),
+        )
+        self._last_beergame_note = note
+        # `note` currently unused (no memory), but kept for parity with AMem version
+        return int(order_qty)
+
+    def run_beergame(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Entry point for SeriousGame / BeerGame evaluation.
+
+        Delegates environment roll-out and logging to utils.seriousgame_tools,
+        using self._decide_order_qty as the policy function.
+        """
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"BeerGame only supports modes {self.SUPPORTED_MODES}, got '{mode}'"
+            )
+        if not test_samples:
+            raise ValueError("BeerGame requires non-empty test_samples")
+
+        # Allow config to override default max_order_qty if provided
+        beergame_cfg = dict((config or {}).get("beergame", {}) or {})
+        max_order = beergame_cfg.get("max_order_qty")
+        if max_order is None:
+            max_order = getattr(self, "max_order_qty", 5000)
+        self.max_order_qty = int(max_order)
+
+        ctx = beergame_prepare_run(
+            mode=mode,
+            test_samples=test_samples,
+            config=config or {},
+            allowed_modes=self.SUPPORTED_MODES,
+            agent_method=self.agent_method,
+        )
+        results, error_log = beergame_evaluate_run(
+            agent=self,
+            test_samples=test_samples,
+            config=config or {},
+            ctx=ctx,
+        )
+        beergame_save_run(
+            results=results,
+            error_log=error_log,
+            config=config or {},
+            ctx=ctx,
+        )
+        return results
+
+    # ==========================================================
+    # EDT support (SeriousGame) - scenario schema + run wrapper
+    # ==========================================================
+
+    def _decide_edt_scenario_schema(
+        self,
+        base_summary: Dict[str, Any],
+        scenario_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Single-scenario EDT design decision.
+
+        This implementation:
+        - uses utils.seriousgame_tools EDT helpers
+        - does NOT touch ACE playbook; purely scenario-level policy.
+        """
+        ctx = build_edt_decision_context(
+            base_summary=base_summary,
+            scenario_meta=scenario_meta,
+            max_steps_hint=(scenario_meta or {}).get("max_steps"),
+        )
+        # 让 seriousgame_tools 生成 system / user prompt
+        system, user = render_edt_prompt(ctx)
+
+        # 在原始 prompt 基础上增加 ACE 风格 CoT 约束（但不要求模型显式输出推理）
+        user = (
+            user
+            + "\n\nYou are an ACE (Analyze–Critique–Enhance) operations strategist.\n"
+              "1) Internally analyze the current simulation template and objectives.\n"
+              "2) Internally propose a scenario configuration schema and critique it.\n"
+              "3) Internally refine the schema.\n"
+              "IMPORTANT: Do NOT reveal your step-by-step analysis or critique.\n"
+              "Return ONLY a JSON object that matches the expected EDT scenario schema."
+        )
+
+        raw = self._call_llm_json(system=system, user=user)
+        return normalize_edt_schema(raw, ctx)
+
+    def run_edt(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Entry point for SeriousGame / EDT evaluation.
+
+        Delegates scenario construction and roll-out to utils.seriousgame_tools,
+        using self._decide_edt_scenario_schema as the policy for scenario design.
+        """
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"EDT only supports modes {self.SUPPORTED_MODES}, got '{mode}'"
+            )
+        if not test_samples:
+            raise ValueError("EDT requires non-empty test_samples")
+
+        ctx = edt_prepare_run(
+            mode=mode,
+            test_samples=test_samples,
+            config=config or {},
+            allowed_modes=self.SUPPORTED_MODES,
+        )
+        results, error_log = edt_evaluate_run(
+            agent=self,
+            test_samples=test_samples,
+            config=config or {},
+            ctx=ctx,
+        )
+        edt_save_run(
+            results=results,
+            error_log=error_log,
+            config=config or {},
+            ctx=ctx,
+        )
         return results
     
     def _initialize_empty_playbook(self) -> str:
@@ -393,16 +758,35 @@ class ACE:
         config_params = self._extract_config_params(config)
         task_name = config_params['task_name']
         save_dir = config_params['save_dir']
+        name_lower = str(task_name).lower()
 
         # Consulting routing
-        if "consult" in str(task_name).lower():
+        if "consult" in name_lower:
             return self.run_consulting(
                 mode=mode,
                 test_samples=test_samples or [],
                 data_processor=data_processor,
                 config=config or {},
             )
-        
+
+        # BeerGame routing
+        if "beer" in name_lower:
+            return self.run_beergame(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config or {},
+            )
+
+        # EDT routing
+        if "edt" in name_lower:
+            return self.run_edt(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config or {},
+            )
+
         # Setup paths based on mode
         if mode == 'eval_only':
             save_path, log_dir = self._setup_paths(save_dir, task_name, mode)
