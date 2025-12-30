@@ -26,6 +26,16 @@
 bash run_scripts/StructuredReasoning/data_process/reclassify_test.sh
 ```
 
+如果你希望显式复现（不依赖 bash 脚本），可以直接运行 `utils/llm_reclassify.py`：
+
+```bash
+python3 -m utils.llm_reclassify \
+  --config_path StructuredReasoning/data/task_config.json \
+  --split test \
+  --output_name capability_difficulty_score_v1_merged_finer_try50 \
+  --output_root results/StructuredReasoning_run/llm_reclassify_mode
+```
+
 可选（如你也需要 train/val 的标注）：
 
 ```bash
@@ -54,6 +64,17 @@ bash run_scripts/StructuredReasoning/online/run_all_agents_online.sh
 bash run_scripts/StructuredReasoning/online/capability_eval/online/capability_eval_online.sh
 ```
 
+该脚本本质上是在调用 `utils/capability_eval.py`。如果你希望显式复现（不依赖 bash 脚本），可直接运行：
+
+```bash
+python3 -m utils.capability_eval \
+  --results_root results/StructuredReasoning_run \
+  --classify_root results/StructuredReasoning_run/llm_reclassify_mode/capability_difficulty_score_v1_merged_finer_try50 \
+  --out_dir results/StructuredReasoning_run/capability_eval_mode \
+  --only_mode online \
+  --export_csv
+```
+
 默认输出目录：
 
 - `results/StructuredReasoning_run/capability_eval_mode/`
@@ -68,5 +89,10 @@ Consulting 的 Online 脚本位于 `run_scripts/Consulting/online/*.sh`，运行
 ```bash
 bash run_scripts/Consulting/online/run_all_online.sh
 ```
+
+## AOA（Agent-of-Agents）
+
+AOA 的经验提取、离线/规则/LLM 路由评测与命令用法请看：
+- `docs/AOA.md`
 
 

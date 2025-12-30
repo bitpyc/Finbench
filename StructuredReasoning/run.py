@@ -23,6 +23,7 @@ def parse_args():
         choices=[
             "ace",
             "cot",
+            "aoa",
             "amem",
             "dynamic_cheatsheet",
             "self_refine",
@@ -334,6 +335,49 @@ def parse_args():
         type=float,
         default=0.0,
         help="Discussion: 主持人温度。",
+    )
+
+    # AOA (agent-of-agents) specific knobs
+    parser.add_argument(
+        "--aoa_experience_path",
+        type=str,
+        default="results/StructuredReasoning_run/aoa_mode/experience/experience.latest.json",
+        help="AOA: experience JSON (findings + routing_policy) used by router.",
+    )
+    parser.add_argument(
+        "--aoa_router_model",
+        type=str,
+        default="",
+        help="AOA: router model name (default: same as --generator_model).",
+    )
+    parser.add_argument(
+        "--aoa_router_temperature",
+        type=float,
+        default=0.0,
+        help="AOA: router temperature.",
+    )
+    parser.add_argument(
+        "--aoa_router_max_tokens",
+        type=int,
+        default=512,
+        help="AOA: router max tokens for the routing decision call.",
+    )
+    parser.add_argument(
+        "--aoa_candidates",
+        type=str,
+        default="cot,amem,self_refine,reflexion,debate,discussion",
+        help="AOA: comma-separated candidate underlying agent methods.",
+    )
+    parser.add_argument(
+        "--aoa_include_dynamic_cheatsheet",
+        action="store_true",
+        help="AOA: allow router to choose dynamic_cheatsheet (stateful, slower).",
+    )
+    parser.add_argument(
+        "--aoa_labels_jsonl",
+        type=str,
+        default="",
+        help="AOA: optional classifications.jsonl for this task (index-aligned to test_samples) to provide capability/difficulty labels.",
     )
 
     return parser.parse_args()
@@ -678,6 +722,40 @@ def main():
             moderator_temperature=args.discussion_moderator_temperature,
         )
         discussion_agent.run(
+            mode=args.mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )
+    elif args.agent_method == "aoa":
+        from Agents.aoa.agent import AOAAgent, AOAConfig
+
+        if args.mode not in ["online", "eval_only"]:
+            raise ValueError(f"{args.agent_method.upper()} agent 当前只支持 online/eval_only 模式，收到 {args.mode}")
+
+        router_model = args.aoa_router_model.strip() or args.generator_model
+        candidates = [c.strip() for c in (args.aoa_candidates or "").split(",") if c.strip()]
+        aoa_cfg = AOAConfig(
+            router_model=router_model,
+            router_temperature=args.aoa_router_temperature,
+            router_max_tokens=args.aoa_router_max_tokens,
+            candidates=tuple(candidates),
+            include_dynamic_cheatsheet=bool(args.aoa_include_dynamic_cheatsheet),
+        )
+
+        # Pass extra knobs through config for logging
+        config["aoa_experience_path"] = args.aoa_experience_path
+        config["aoa_labels_jsonl"] = args.aoa_labels_jsonl
+
+        aoa_agent = AOAAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="aoa",
+            aoa_config=aoa_cfg,
+            experience_path=args.aoa_experience_path,
+        )
+        aoa_agent.run(
             mode=args.mode,
             test_samples=test_samples,
             data_processor=data_processor,

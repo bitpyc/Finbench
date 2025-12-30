@@ -377,8 +377,8 @@ def main() -> None:
     ap.add_argument(
         "--csv_agents",
         type=str,
-        default="cot,self-refine,reflexion,debate,discussion,dc,gepa,ace,amem",
-        help="Comma-separated agent columns for CSV export: cot,self-refine,reflexion,debate,discussion,dc,gepa,ace,amem",
+        default="cot,self-refine,reflexion,debate,discussion,dc,gepa,ace,amem,aoa",
+        help="Comma-separated agent columns for CSV export: cot,self-refine,reflexion,debate,discussion,dc,gepa,ace,amem,aoa",
     )
     ap.add_argument(
         "--csv_out",
@@ -602,6 +602,7 @@ def main() -> None:
             "gepa": "gepa",
             "ace": "ace",
             "amem": "amem",
+            "aoa": "aoa",
         }
         out_csv_path = (
             Path(args.csv_out)

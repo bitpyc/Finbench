@@ -7,6 +7,7 @@ __all__ = [
     "ace",
     "cot",
     "amem",
+    "aoa",
     "dynamic_cheatsheet",
     "self_refine",
     "reflexion",

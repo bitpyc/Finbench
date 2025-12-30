@@ -41,6 +41,7 @@ AGENT_COL_TO_DIR = {
     "gepa": "gepa",
     "ace": "ace",
     "amem": "amem",
+    "aoa": "aoa",
 }
 
 
@@ -145,6 +146,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
