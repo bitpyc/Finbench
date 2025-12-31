@@ -920,10 +920,26 @@ class AgenticMemorySystem:
                 all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
             neighborhood = all_memories[i].links
             for nn in neighborhood:
-                neighbor = int(nn.strip().split(':')[-1])
-                memory_str += "talk start time:" + all_memories[neighbor].timestamp + "memory content: " + all_memories[
-                    neighbor].content + "memory context: " + all_memories[neighbor].context + "memory keywords: " + str(
-                    all_memories[neighbor].keywords) + "memory tags: " + str(all_memories[neighbor].tags) + "\n"
+                # links 可能已是 int 或带 ":" 的字符串，做兼容处理
+                try:
+                    neighbor = nn if isinstance(nn, int) else int(str(nn).split(":")[-1])
+                except Exception:
+                    continue
+                if neighbor < 0 or neighbor >= len(all_memories):
+                    continue
+                memory_str += (
+                    "talk start time:"
+                    + all_memories[neighbor].timestamp
+                    + "memory content: "
+                    + all_memories[neighbor].content
+                    + "memory context: "
+                    + all_memories[neighbor].context
+                    + "memory keywords: "
+                    + str(all_memories[neighbor].keywords)
+                    + "memory tags: "
+                    + str(all_memories[neighbor].tags)
+                    + "\n"
+                )
                 if j >= k:
                     break
                 j += 1

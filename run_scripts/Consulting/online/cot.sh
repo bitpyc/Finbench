@@ -25,6 +25,9 @@ GENERATOR_MODEL="USD-guiji/deepseek-v3"   # 或者你的 GPT-4.1/DeepSeek 模型
 MODE="online"                    # online / eval_only
 MAX_TURNS=12
 
+# 可选：仅跑前 N 个 case（用于快速冒烟测试）。留空/注释则跑全量。
+# NUM_CASES=3
+
 # 是否启用 LLM Judge 打分（加上该变量则开启）
 ENABLE_JUDGE=true
 
@@ -58,6 +61,7 @@ nohup python -u -m Consulting.run \
   --save_dir "${SAVE_DIR}" \
   --mode "${MODE}" \
   --max_turns "${MAX_TURNS}" \
+  ${NUM_CASES:+--num_cases "${NUM_CASES}"} \
   ${JUDGE_FLAG} \
   >"${LOG_FILE}" 2>&1 &
 

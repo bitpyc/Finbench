@@ -13,6 +13,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from utils.consulting_tools import evaluate_consulting_set
+
+
 from utils.tools import evaluate_test_set
 from utils.seriousgame_tools import (
     beergame_prepare_run,
@@ -100,8 +102,13 @@ class DebateAgent:
         self._current_case_id = None
 
     def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        """
+        Consulting candidate reply using debate workflow:
+        PRO/CON rounds then JUDGE synthesis via DebateGenerator.
+        """
         turns = sum(1 for h in history if h.get("role") == "candidate")
 
+        # 最近 interviewer 提问
         last_interviewer_msg = ""
         for h in reversed(history):
             if h.get("role") == "interviewer":
@@ -114,38 +121,42 @@ class DebateAgent:
         ]
         transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
 
-        system = (
-            "You are the CANDIDATE in a consulting-style case interview.\n"
-            "You only see the dialogue history, not the hidden case text.\n"
-            "Act like a top-tier consulting candidate: structured, "
-            "hypothesis-driven, quantitative when possible, clear and concise.\n\n"
-            "Respond ONLY with what you would say next as the candidate.\n"
-            'Wrap your answer in a JSON object of the form:\n'
-            '  {\"reply\": \"<your answer>\"}\n'
-            "Do not include any other fields."
+        # 走 debate 生成链：question=最新提问，context=全量对话
+        response_text, _, meta = self.generator.generate(
+            question=last_interviewer_msg or "(Interviewer message missing.)",
+            playbook="",
+            context=transcript_text,
+            reflection="(empty)",
+            use_json_mode=True,
+            call_id=f"consult_debate_{case_id}_t{turns}",
+            log_dir=None,
         )
 
-        user_parts = [
-            f"Current case ID: {case_id}",
-            "",
-            "Dialogue so far (Interviewer / Candidate):",
-            transcript_text,
-            "",
-            "Interviewer just said:",
-            last_interviewer_msg or "[no interviewer message found]",
-            "",
-            "Now respond with your next candidate message, wrapped in JSON "
-            'as {\"reply\": \"...\"}.',
-        ]
-        user_prompt = "\n".join(user_parts)
+        # 解析 JSON 的 final_answer/reply，失败则回退原文本
+        reply = None
+        try:
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict):
+                reply = parsed.get("final_answer") or parsed.get("reply")
+        except Exception:
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}")
+                if 0 <= start < end:
+                    parsed = json.loads(response_text[start : end + 1])
+                    if isinstance(parsed, dict):
+                        reply = parsed.get("final_answer") or parsed.get("reply")
+            except Exception:
+                reply = None
 
-        data = self._call_llm_json(system=system, user=user_prompt)
-        reply = data.get("reply")
         if not isinstance(reply, str) or not reply.strip():
+            reply = response_text.strip()
+        if not reply:
             reply = (
                 "Let me outline the key drivers, share a hypothesis, and the first "
                 "analyses I'd run to validate it."
             )
+
         return reply.strip()
 
     # ==========================================================
@@ -154,9 +165,7 @@ class DebateAgent:
 
     def _decide_order_qty(self, obs: Dict[str, Any], ctx: Dict[str, Any]) -> int:
         """
-        BeerGame 单步决策（无记忆版本）。
-        - 核心任务逻辑委托给 utils.seriousgame_tools。
-        - Debate 仅负责调用模型并解析 JSON。
+        BeerGame 单步决策：使用 Debate（PRO/CON/JUDGE 多轮）生成，JSON-only，失败回退基线。
         """
         role = str(ctx.get("role", obs.get("role", "retailer")))
         max_order_qty = int(getattr(self, "max_order_qty", 5000))
@@ -174,21 +183,134 @@ class DebateAgent:
             base_order=base_order,
         )
 
-        # 让模型在私下思考后给出决策，但仍保持输出 JSON。
-        user = (
-            user
-            + "\n\nThink through the trade-offs step-by-step privately, then output "
-            "ONLY a JSON object with the final order quantity."
+        question_text = (
+            f"{system}\n\n{user}\n\n"
+            "You must respond strictly in JSON ONLY, exactly in the form:\n"
+            "{\n"
+            '  \"order_qty\": <integer>,\n'
+            '  \"note\": \"<brief rationale>\"\n'
+            "}\n"
+            "No other keys. No text before or after JSON. Do NOT reveal chain-of-thought."
         )
 
-        js = self._call_llm_json(system=system, user=user)
-        order_qty, note = beergame_extract_order_and_note(
-            js=js,
+        response_text, _trace, _meta = self.generator.generate(
+            question=question_text,
+            playbook="",
+            context="",
+            reflection="",
+            use_json_mode=True,
+            call_id=f"beergame_debate_{ctx.get('scenario_id','')}_{ctx.get('episode_id','')}_w{obs.get('week','')}",
+            log_dir=None,
+        )
+
+        order_qty, used_fallback = self._extract_order_qty_from_debate(
+            response_text=response_text,
             base_order=base_order,
             max_order_qty=max_order_qty,
         )
-        self._last_beergame_note = note
+        fallback_tag = " (fallback_base_order)" if used_fallback else ""
+        self._last_beergame_note = f"debate_final{fallback_tag}: {response_text[:500]}"
         return int(order_qty)
+
+    def _extract_order_qty_from_debate(
+        self, response_text: str, base_order: int, max_order_qty: int
+    ) -> tuple[int, bool]:
+        """
+        从 Debate 生成的 JSON 文本中提取订单；失败则回退 base_order，并返回是否回退。
+        """
+        candidate = None
+        try:
+            data = json.loads(response_text)
+            if isinstance(data, dict):
+                for key in (
+                    "order_qty",
+                    "order",
+                    "quantity",
+                    "final_answer",
+                    "reply",
+                    "orderQty",
+                    "decision",
+                    "final_value",
+                ):
+                    val = data.get(key)
+                    if isinstance(val, dict):
+                        for subkey in ("order_qty", "order", "quantity", "value"):
+                            subval = val.get(subkey)
+                            if isinstance(subval, (int, float)):
+                                candidate = int(subval)
+                                break
+                            if isinstance(subval, str) and subval.strip():
+                                import re
+
+                                m = re.search(r"-?\d+", subval)
+                                if m:
+                                    candidate = int(m.group(0))
+                                    break
+                        if candidate is not None:
+                            break
+                    if isinstance(val, (int, float)):
+                        candidate = int(val)
+                        break
+                    if isinstance(val, str) and val.strip():
+                        import re
+
+                        m = re.search(r"-?\d+", val)
+                        if m:
+                            candidate = int(m.group(0))
+                            break
+        except Exception:
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}")
+                if 0 <= start < end:
+                    data = json.loads(response_text[start : end + 1])
+                    if isinstance(data, dict):
+                        for key in (
+                            "order_qty",
+                            "order",
+                            "quantity",
+                            "final_answer",
+                            "reply",
+                            "orderQty",
+                            "decision",
+                            "final_value",
+                        ):
+                            val = data.get(key)
+                            if isinstance(val, dict):
+                                for subkey in ("order_qty", "order", "quantity", "value"):
+                                    subval = val.get(subkey)
+                                    if isinstance(subval, (int, float)):
+                                        candidate = int(subval)
+                                        break
+                                    if isinstance(subval, str) and subval.strip():
+                                        import re
+
+                                        m = re.search(r"-?\d+", subval)
+                                        if m:
+                                            candidate = int(m.group(0))
+                                            break
+                                if candidate is not None:
+                                    break
+                            if isinstance(val, (int, float)):
+                                candidate = int(val)
+                                break
+                            if isinstance(val, str) and val.strip():
+                                import re
+
+                                m = re.search(r"-?\d+", val)
+                                if m:
+                                    candidate = int(m.group(0))
+                                    break
+            except Exception:
+                candidate = None
+
+        used_fallback = candidate is None
+        if candidate is None:
+            candidate = base_order
+            print(f"[Debate][BeerGame] parse failed, fallback to base_order={base_order}")
+
+        candidate = max(0, min(int(candidate), max_order_qty))
+        return candidate, used_fallback
 
     def run_beergame(
         self,

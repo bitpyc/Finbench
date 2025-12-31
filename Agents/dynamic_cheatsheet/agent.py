@@ -82,6 +82,9 @@ class DynamicCheatsheetAgent:
         self.retrieval_embeddings: List[List[float]] = []
         self.retrieval_index: Dict[str, int] = {}
         self.retrieval_outputs: Dict[int, str] = {}
+        # BeerGame cheatsheet persistence
+        self.beergame_cheatsheet_path: Optional[str] = None
+        self.beergame_cheatsheet_text: str = ""
 
     def _prepare_dirs(self, task_name: str, mode: str, save_dir: str) -> Dict[str, str]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -320,6 +323,12 @@ class DynamicCheatsheetAgent:
         self._current_case_id = None
 
     def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        """
+        Consulting candidate reply using dynamic cheatsheet with persistence:
+        - retrieves current cheatsheet (per run)
+        - runs cumulative generation
+        - updates cheatsheet for subsequent cases.
+        """
         turns = sum(1 for h in history if h.get("role") == "candidate")
 
         last_interviewer_msg = ""
@@ -334,33 +343,47 @@ class DynamicCheatsheetAgent:
         ]
         transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
 
-        system = (
-            "You are the CANDIDATE in a consulting-style case interview.\n"
-            "You only see the dialogue history, not the hidden case text.\n"
-            "Act like a top-tier consulting candidate: structured, "
-            "hypothesis-driven, quantitative when possible, clear and concise.\n\n"
-            "Respond ONLY with what you would say next as the candidate.\n"
-            'Wrap your answer in a JSON object of the form:\n'
-            '  {\"reply\": \"<your answer>\"}\n'
-            "Do not include any other fields."
+        cheatsheet_text = getattr(self, "_consulting_cheatsheet", "(empty)")
+
+        input_txt = (
+            f"[Consulting case: {case_id}] Latest interviewer question:\n"
+            f"{last_interviewer_msg or '(Interviewer message missing.)'}\n\n"
+            f"Dialogue so far:\n{transcript_text}"
         )
 
-        user_parts = [
-            f"Current case ID: {case_id}",
-            "",
-            "Dialogue so far (Interviewer / Candidate):",
-            transcript_text,
-            "",
-            "Interviewer just said:",
-            last_interviewer_msg or "[no interviewer message found]",
-            "",
-            "Now respond with your next candidate message, wrapped in JSON "
-            'as {\"reply\": \"...\"}.',
-        ]
-        user_prompt = "\n".join(user_parts)
+        try:
+            output = self.language_model.advanced_generate(
+                approach_name="DynamicCheatsheet_Cumulative",
+                input_txt=input_txt,
+                cheatsheet=cheatsheet_text,
+                generator_template=self.generator_prompt,
+                cheatsheet_template=self.cheatsheet_prompt,
+                temperature=self.dc_config.temperature,
+                max_tokens=self.max_tokens,
+                max_num_rounds=self.dc_config.max_num_rounds,
+                allow_code_execution=self.dc_config.allow_code_execution,
+                code_execution_flag="EXECUTE CODE!",
+                add_previous_answers_to_cheatsheet=self.dc_config.add_previous_answers,
+                retrieve_top_k=self.dc_config.retrieve_top_k,
+                log_dir=None,
+                call_prefix=f"consult_dc_{case_id}_t{turns}",
+            )
+            reply = output.get("final_answer") or output.get("final_output") or ""
+            new_cheatsheet = output.get("final_cheatsheet") or cheatsheet_text
+        except Exception:
+            reply = ""
+            new_cheatsheet = cheatsheet_text
 
-        data = self._call_llm_json(system=system, user=user_prompt)
-        reply = data.get("reply")
+        # 更新并持久化 cheatsheet
+        try:
+            self._consulting_cheatsheet = new_cheatsheet
+            path = getattr(self, "_consulting_cheatsheet_path", None)
+            if path:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(new_cheatsheet)
+        except Exception:
+            pass
+
         if not isinstance(reply, str) or not reply.strip():
             reply = (
                 "Let me structure the issues, share a hypothesis, and outline the "
@@ -369,16 +392,33 @@ class DynamicCheatsheetAgent:
         return reply.strip()
 
     # ==========================================================
-    # BeerGame: decision hook + evaluation entry (memory-free)
+    # BeerGame: decision hook + evaluation entry (cheatsheet persistence)
     # ==========================================================
+
+    def _load_beergame_cheatsheet(self, path: str) -> None:
+        """加载/初始化 BeerGame cheatsheet（跨 episode 持久化）。"""
+        self.beergame_cheatsheet_path = path
+        try:
+            # 优先加载“当前 cheatsheet”文件；否则退回读取追加日志文件（可能很长）
+            current_path = path + ".current"
+            if os.path.exists(current_path):
+                with open(current_path, "r", encoding="utf-8") as f:
+                    self.beergame_cheatsheet_text = f.read().strip()
+            elif os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    self.beergame_cheatsheet_text = f.read().strip()
+            else:
+                self.beergame_cheatsheet_text = ""
+        except Exception:
+            self.beergame_cheatsheet_text = ""
     def _decide_order_qty(self, obs: Dict[str, Any], ctx: Dict[str, Any]) -> int:
         """
-        BeerGame 单步决策（无记忆 baseline，与 CoT 逻辑保持一致）。
+        BeerGame 决策：使用 DynamicCheatsheet（cumulative cheatsheet + generator/curator），
+        读取/写入持久化 cheatsheet，并强制 JSON-only 输出。
         """
         role = str(ctx.get("role", obs.get("role", "retailer")))
+        week = int(obs.get("week", 0) or 0)
         max_order_qty = int(getattr(self, "max_order_qty", 5000))
-
-        _ = beergame_build_query(obs)  # 预留检索/日志
 
         base_order = beergame_base_rule_order(
             obs=obs,
@@ -389,24 +429,189 @@ class DynamicCheatsheetAgent:
         system, user = beergame_render_prompt(
             role=role,
             obs=obs,
-            retrieved="",  # dynamic_cheatsheet baseline 无记忆
+            retrieved=self.beergame_cheatsheet_text,
             base_order=base_order,
         )
 
-        user = (
-            user
-            + "\n\nThink step-by-step privately to choose the best order quantity. "
-            "Do NOT reveal your chain-of-thought. Output ONLY JSON."
+        question_text = (
+            f"{system}\n\n{user}\n\n"
+            "You must respond strictly in JSON ONLY, exactly in the form:\n"
+            "{\n"
+            '  "order_qty": <integer>,\n'
+            '  "note": "<brief rationale>"\n'
+            "}\n"
+            "No other keys. No text before or after JSON. Do NOT reveal chain-of-thought."
         )
 
-        js = self._call_llm_json(system=system, user=user)
-        order_qty, note = beergame_extract_order_and_note(
-            js=js,
+        context_text = (
+            "Cheatsheet (persistent across BeerGame runs):\n"
+            f"{self.beergame_cheatsheet_text or '(empty)'}"
+        )
+
+        # 用 DynamicCheatsheetLanguageModel.advanced_generate 生成，并更新 cheatsheet
+        # 注意：该实现内部不支持 json_mode 参数，因此通过 prompt 约束 JSON-only。
+        generator_template = (
+            "You are a BeerGame ordering agent.\n"
+            "You MUST output strictly valid JSON ONLY, exactly in the form:\n"
+            "{\n"
+            '  \"order_qty\": <integer>,\n'
+            '  \"note\": \"<brief rationale>\"\n'
+            "}\n"
+            "No other keys. No text before or after JSON.\n\n"
+            "Cheatsheet (learned heuristics):\n[[CHEATSHEET]]\n\n"
+            "Task:\n[[QUESTION]]\n"
+        )
+        cheatsheet_template = (
+            "You are updating a BeerGame decision cheatsheet.\n"
+            "Given the latest task and model answer, update the cheatsheet with concise reusable heuristics.\n"
+            "Return ONLY:\n<cheatsheet>\n...updated cheatsheet...\n</cheatsheet>\n\n"
+            "Task:\n[[QUESTION]]\n\n"
+            "Model answer:\n[[MODEL_ANSWER]]\n\n"
+            "Previous cheatsheet:\n[[PREVIOUS_CHEATSHEET]]\n"
+        )
+
+        output = self.language_model.advanced_generate(
+            approach_name="DynamicCheatsheet_Cumulative",
+            input_txt=question_text,
+            cheatsheet=self.beergame_cheatsheet_text or "(empty)",
+            generator_template=generator_template,
+            cheatsheet_template=cheatsheet_template,
+            cheatsheet_question=question_text,
+            temperature=self.dc_config.temperature,
+            max_tokens=min(self.max_tokens, 512),
+            max_num_rounds=max(1, int(self.dc_config.max_num_rounds)),
+            allow_code_execution=False,  # BeerGame 不需要执行代码
+            code_execution_flag="EXECUTE CODE!",
+            add_previous_answers_to_cheatsheet=True,
+            retrieve_top_k=max(1, int(self.dc_config.retrieve_top_k)),
+            log_dir=None,
+            call_prefix=f"beergame_dyncht_{ctx.get('scenario_id','')}_{ctx.get('episode_id','')}_w{week}",
+        )
+
+        response_text = str(output.get("final_answer") or output.get("final_output") or "").strip()
+        new_cheatsheet = str(output.get("final_cheatsheet") or self.beergame_cheatsheet_text or "").strip()
+        if new_cheatsheet and new_cheatsheet != self.beergame_cheatsheet_text:
+            self.beergame_cheatsheet_text = new_cheatsheet
+
+        order_qty = self._extract_order_qty_from_dyncht(
+            response_text=response_text,
             base_order=base_order,
             max_order_qty=max_order_qty,
         )
-        self._last_beergame_note = note
+
+        # 持久化记录到 cheatsheet（追加决策 + 覆写最新 cheatsheet）
+        try:
+            entry = (
+                f"week={week} role={role} order={order_qty} base={base_order} "
+                f"note={response_text.strip()[:400]}"
+            )
+            if self.beergame_cheatsheet_path:
+                # 1) 追加决策日志
+                with open(self.beergame_cheatsheet_path, "a", encoding="utf-8") as f:
+                    f.write(entry + "\n")
+                # 2) 另存一份“当前 cheatsheet”，便于下次加载
+                with open(self.beergame_cheatsheet_path + ".current", "w", encoding="utf-8") as f:
+                    f.write(self.beergame_cheatsheet_text or "")
+        except Exception:
+            pass
+
         return int(order_qty)
+
+    def _extract_order_qty_from_dyncht(
+        self, response_text: str, base_order: int, max_order_qty: int
+    ) -> int:
+        """
+        从 DynamicCheatsheet 输出解析订单；失败回退 base_order 并打印。
+        """
+        candidate = None
+        try:
+            import re
+
+            data = json.loads(response_text)
+            if isinstance(data, dict):
+                for key in (
+                    "order_qty",
+                    "order",
+                    "quantity",
+                    "final_answer",
+                    "reply",
+                    "orderQty",
+                    "decision",
+                    "final_value",
+                ):
+                    val = data.get(key)
+                    if isinstance(val, dict):
+                        for subkey in ("order_qty", "order", "quantity", "value"):
+                            subval = val.get(subkey)
+                            if isinstance(subval, (int, float)):
+                                candidate = int(subval)
+                                break
+                            if isinstance(subval, str) and subval.strip():
+                                m = re.search(r"-?\d+", subval)
+                                if m:
+                                    candidate = int(m.group(0))
+                                    break
+                        if candidate is not None:
+                            break
+                    if isinstance(val, (int, float)):
+                        candidate = int(val)
+                        break
+                    if isinstance(val, str) and val.strip():
+                        m = re.search(r"-?\d+", val)
+                        if m:
+                            candidate = int(m.group(0))
+                            break
+        except Exception:
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}")
+                if 0 <= start < end:
+                    data = json.loads(response_text[start : end + 1])
+                    if isinstance(data, dict):
+                        import re
+
+                        for key in (
+                            "order_qty",
+                            "order",
+                            "quantity",
+                            "final_answer",
+                            "reply",
+                            "orderQty",
+                            "decision",
+                            "final_value",
+                        ):
+                            val = data.get(key)
+                            if isinstance(val, dict):
+                                for subkey in ("order_qty", "order", "quantity", "value"):
+                                    subval = val.get(subkey)
+                                    if isinstance(subval, (int, float)):
+                                        candidate = int(subval)
+                                        break
+                                    if isinstance(subval, str) and subval.strip():
+                                        m = re.search(r"-?\d+", subval)
+                                        if m:
+                                            candidate = int(m.group(0))
+                                            break
+                                if candidate is not None:
+                                    break
+                            if isinstance(val, (int, float)):
+                                candidate = int(val)
+                                break
+                            if isinstance(val, str) and val.strip():
+                                m = re.search(r"-?\d+", val)
+                                if m:
+                                    candidate = int(m.group(0))
+                                    break
+            except Exception:
+                candidate = None
+
+        if candidate is None:
+            candidate = base_order
+            print(f"[DynamicCheatsheet][BeerGame] parse failed, fallback to base_order={base_order}")
+
+        candidate = max(0, min(int(candidate), max_order_qty))
+        self._last_beergame_note = f"dyncht_final{' (fallback_base_order)' if candidate == base_order else ''}: {response_text[:500]}"
+        return candidate
 
     def run_beergame(
         self,
@@ -417,6 +622,15 @@ class DynamicCheatsheetAgent:
     ) -> Dict[str, Any]:
         """BeerGame 评测入口（委托 seriousgame_tools 通用流程）。"""
         _ = data_processor
+
+        # 加载/初始化跨 episode 持久化的 cheatsheet
+        try:
+            save_dir = config.get("save_dir", "results")
+            self._load_beergame_cheatsheet(
+                os.path.join(save_dir, "dynamic_cheatsheet_beergame.txt")
+            )
+        except Exception:
+            pass
 
         beergame_cfg = dict(config.get("beergame", {}) or {})
         self.max_order_qty = int(
@@ -473,6 +687,17 @@ class DynamicCheatsheetAgent:
         print(f"Cases: {len(test_samples)}")
         print(f"Save dir: {resolved_save_path}")
         print(f"{'='*60}\n")
+
+        # 持久化 cheatsheet（咨询模式专用，跨 case 有效）
+        self._consulting_cheatsheet_path = os.path.join(resolved_save_path, "consulting_cheatsheet.txt")
+        try:
+            if os.path.exists(self._consulting_cheatsheet_path):
+                with open(self._consulting_cheatsheet_path, "r", encoding="utf-8") as f:
+                    self._consulting_cheatsheet = f.read().strip() or "(empty)"
+            else:
+                self._consulting_cheatsheet = "(empty)"
+        except Exception:
+            self._consulting_cheatsheet = "(empty)"
 
         results, error_log = evaluate_consulting_set(
             agent=self,

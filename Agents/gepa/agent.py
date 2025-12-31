@@ -52,6 +52,10 @@ class GEPAAgent:
         # 复用全局客户端初始化
         self.generator_client, self.reflector_client, _ = initialize_clients(api_provider)
         self.temperature = 0.7
+        # BeerGame prompt state (selected via prompt-search in run_beergame)
+        self._beergame_policy_prompt: Optional[str] = None
+        self._beergame_best_prompt_path: Optional[str] = None
+        self._beergame_log_dir: Optional[str] = None
 
     def _split_eval_only(
         self, samples: List[Dict[str, Any]], ratio: float, mini_batch_size: int
@@ -131,18 +135,35 @@ class GEPAAgent:
     # ==========================================================
 
     def _call_llm_json(self, system: str, user: str) -> Dict[str, Any]:
+        """
+        JSON-only LLM call wrapper with retries (timed_llm_call) to avoid timeouts.
+        """
         import json as _json
 
-        resp = self.generator_client.chat.completions.create(
-            model=self.generator_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=self.temperature,
-            max_tokens=min(self.max_tokens, 512),
-        )
-        text = (resp.choices[0].message.content or "").strip()
+        call_id = "test_gepa_beergame_json"
+        try:
+            resp_text, _ = timed_llm_call(
+                self.generator_client,
+                api_provider=self.api_provider,
+                model=self.generator_model,
+                prompt="",
+                role="gepa_beergame",
+                call_id=call_id,
+                max_tokens=min(int(self.max_tokens), 512),
+                log_dir=self._beergame_log_dir,
+                use_json_mode=True,
+                temperature=float(getattr(self, "temperature", 0.7)),
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+        except Exception:
+            return {}
+
+        text = (resp_text or "").strip()
+        if not text:
+            return {}
         if not text.startswith("{"):
             i = text.find("{")
             if i >= 0:
@@ -152,9 +173,53 @@ class GEPAAgent:
             if j >= 0:
                 text = text[: j + 1]
         try:
-            return _json.loads(text)
+            obj = _json.loads(text)
+            return obj if isinstance(obj, dict) else {}
         except Exception:
             return {}
+
+    @staticmethod
+    def _extract_order_qty_from_gepa(
+        js: Dict[str, Any],
+        *,
+        base_order: int,
+        max_order_qty: int,
+        ctx: Dict[str, Any],
+    ) -> Tuple[int, str]:
+        """
+        Robust extraction with explicit fallback printing.
+        Expected: {"order_qty": <int>, "note": "<str>"} but tolerate minor schema drift.
+        """
+        note = ""
+        try:
+            if isinstance(js, dict):
+                note = js.get("note", "") if isinstance(js.get("note", ""), str) else ""
+        except Exception:
+            note = ""
+
+        order_raw: Any = base_order
+        if isinstance(js, dict):
+            for k in ("order_qty", "order", "quantity", "decision", "final_value"):
+                if k in js:
+                    order_raw = js.get(k)
+                    break
+
+        order_qty = base_order
+        ok = True
+        try:
+            order_qty = int(order_raw)
+        except Exception:
+            ok = False
+            order_qty = int(base_order)
+
+        order_qty = max(0, min(int(max_order_qty), int(order_qty)))
+        if not ok:
+            print(
+                f"[GEPA][BeerGame] parse failed -> fallback base_order={int(base_order)} "
+                f"(scenario_id={ctx.get('scenario_id','')}, episode_id={ctx.get('episode_id','')}, week={ctx.get('week', '')})",
+                flush=True,
+            )
+        return int(order_qty), (note or "").strip()
 
     def on_case_start(self, case_id: str) -> None:
         self._current_case_id = case_id
@@ -169,6 +234,12 @@ class GEPAAgent:
         self._current_case_id = None
 
     def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        """
+        Consulting reply via GEPA-style prompt: use current best prompt (seed)
+        to answer latest interviewer question conditioned on full transcript.
+        """
+        turns = sum(1 for h in history if h.get("role") == "candidate")
+
         last_interviewer_msg = ""
         for h in reversed(history):
             if h.get("role") == "interviewer":
@@ -181,33 +252,27 @@ class GEPAAgent:
         ]
         transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
 
-        system = (
-            "You are the CANDIDATE in a consulting-style case interview.\n"
-            "You only see the dialogue history, not the hidden case text.\n"
-            "Act like a top-tier consulting candidate: structured, "
-            "hypothesis-driven, quantitative when possible, clear and concise.\n\n"
-            "Respond ONLY with what you would say next as the candidate.\n"
-            'Wrap your answer in a JSON object of the form:\n'
-            '  {\"reply\": \"<your answer>\"}\n'
-            "Do not include any other fields."
-        )
+        prompt = self.cfg.seed_prompt or SEED_PROMPT
+        sample = {"question": last_interviewer_msg, "context": transcript_text}
+        contents = _build_query(sample, prompt)
 
-        user_parts = [
-            f"Current case ID: {case_id}",
-            "",
-            "Dialogue so far (Interviewer / Candidate):",
-            transcript_text,
-            "",
-            "Interviewer just said:",
-            last_interviewer_msg or "[no interviewer message found]",
-            "",
-            "Now respond with your next candidate message, wrapped in JSON "
-            'as {\"reply\": \"...\"}.',
-        ]
-        user_prompt = "\n".join(user_parts)
+        reply = ""
+        try:
+            resp, _ = timed_llm_call(
+                self.generator_client,
+                api_provider=self.api_provider,
+                model=self.generator_model,
+                prompt=contents,
+                role="gepa_consult_reply",
+                call_id=f"gepa_consult_{case_id}_t{turns}",
+                max_tokens=self.max_tokens,
+                use_json_mode=False,
+                temperature=self.cfg.target_temperature,
+            )
+            reply = resp
+        except Exception:
+            reply = ""
 
-        data = self._call_llm_json(system=system, user=user_prompt)
-        reply = data.get("reply")
         if not isinstance(reply, str) or not reply.strip():
             reply = (
                 "Let me structure the issues, propose a hypothesis, and outline "
@@ -216,16 +281,23 @@ class GEPAAgent:
         return reply.strip()
 
     # ==========================================================
-    # BeerGame: decision hook + evaluation entry (无记忆版)
+    # BeerGame: decision hook + evaluation entry
     # ==========================================================
     def _decide_order_qty(self, obs: Dict[str, Any], ctx: Dict[str, Any]) -> int:
         """
-        BeerGame 单步决策，与 CoT 基线一致（不使用记忆）。
+        BeerGame 单步决策：使用 run_beergame 选出的 best prompt（若有），否则回退 seed prompt。
         """
         role = str(ctx.get("role", obs.get("role", "retailer")))
         max_order_qty = int(getattr(self, "max_order_qty", 5000))
 
         _ = beergame_build_query(obs)  # 预留日志/扩展
+
+        # expose week for fallback logging
+        try:
+            ctx = dict(ctx)
+            ctx["week"] = obs.get("week")
+        except Exception:
+            pass
 
         base_order = beergame_base_rule_order(
             obs=obs,
@@ -236,21 +308,31 @@ class GEPAAgent:
         system, user = beergame_render_prompt(
             role=role,
             obs=obs,
-            retrieved="",  # GEPA 版本无记忆
+            retrieved="",
             base_order=base_order,
+        )
+
+        policy_prompt = (
+            self._beergame_policy_prompt
+            or (self.cfg.seed_prompt or "")
+            or "You are a supply-chain decision agent. Minimize long-run cost (inventory + backlog) and avoid bullwhip."
         )
 
         user = (
             user
+            + "\n\n[Policy prompt]\n"
+            + str(policy_prompt).strip()
             + "\n\nThink step-by-step privately to choose the best order quantity. "
-            "Do NOT reveal your chain-of-thought. Output ONLY JSON."
+              "Do NOT reveal your chain-of-thought. "
+              "Return ONLY JSON: {\"order_qty\": <int>, \"note\": \"<short>\"}."
         )
 
         js = self._call_llm_json(system=system, user=user)
-        order_qty, note = beergame_extract_order_and_note(
-            js=js,
+        order_qty, note = self._extract_order_qty_from_gepa(
+            js,
             base_order=base_order,
             max_order_qty=max_order_qty,
+            ctx=ctx,
         )
         self._last_beergame_note = note
         return int(order_qty)
@@ -262,7 +344,10 @@ class GEPAAgent:
         data_processor: Any,
         config: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """BeerGame 评测入口（委托 seriousgame_tools 通用流程）。"""
+        """
+        BeerGame 评测入口：先用前 K 个 episode 做 prompt search（按成本选择 best prompt），
+        再用 best prompt 跑完整评测集。
+        """
         _ = data_processor
 
         beergame_cfg = dict(config.get("beergame", {}) or {})
@@ -277,6 +362,113 @@ class GEPAAgent:
             allowed_modes=self.SUPPORTED_MODES,
             agent_method=self.agent_method,
         )
+        self._beergame_log_dir = ctx.get("log_dir")
+
+        # -------------------------
+        # Load/persist best prompt
+        # -------------------------
+        save_dir = str(config.get("save_dir", "results"))
+        best_prompt_path = str(
+            beergame_cfg.get("best_prompt_path")
+            or os.path.join(save_dir, "gepa_beergame_best_prompt.txt")
+        )
+        self._beergame_best_prompt_path = best_prompt_path
+        load_best = bool(beergame_cfg.get("load_best_prompt", True))
+        if load_best and os.path.exists(best_prompt_path):
+            try:
+                with open(best_prompt_path, "r", encoding="utf-8") as f:
+                    loaded = f.read().strip()
+                if loaded:
+                    self._beergame_policy_prompt = loaded
+            except Exception:
+                pass
+
+        # -------------------------
+        # Prompt search (early episodes)
+        # -------------------------
+        prompt_search_episodes = int(beergame_cfg.get("prompt_search_episodes", 2))
+        do_search = (
+            prompt_search_episodes > 0
+            and len(test_samples) > 1
+            and not self._beergame_policy_prompt  # if already loaded, skip by default
+        )
+
+        if do_search:
+            seed = (
+                str(beergame_cfg.get("seed_prompt") or "").strip()
+                or str(self.cfg.seed_prompt or "").strip()
+                or "You are a supply-chain decision agent. Minimize long-run cost (inventory + backlog) and avoid bullwhip."
+            )
+            candidates: List[str] = []
+            candidates.append(seed)
+            candidates.append(
+                seed
+                + "\n\nHeuristic: use inventory position inv_pos = inventory + supply_line - backorder. "
+                  "Order toward target_inventory gradually; avoid large swings."
+            )
+            candidates.append(
+                seed
+                + "\n\nHeuristic: smoothing. Let desired = incoming_order + (target_inventory - inv_pos)/4. "
+                  "Clip changes vs last_order to reduce bullwhip."
+            )
+            candidates.append(
+                seed
+                + "\n\nHeuristic: be conservative when backlog is small; be aggressive only when backlog grows. "
+                  "Prefer small adjustments to avoid oscillations."
+            )
+            # de-dup
+            candidates = [c for i, c in enumerate(candidates) if c and c not in candidates[:i]]
+
+            subset = test_samples[:prompt_search_episodes]
+            best_prompt = candidates[0]
+            best_cost = float("inf")
+            records: List[Dict[str, Any]] = []
+
+            for i, cand in enumerate(candidates):
+                self._beergame_policy_prompt = cand
+                sub_log = os.path.join(ctx["resolved_save_path"], f"prompt_search_{i}")
+                os.makedirs(sub_log, exist_ok=True)
+                sub_ctx = dict(ctx)
+                sub_ctx["log_dir"] = sub_log
+                try:
+                    res_i, _ = beergame_evaluate_run(
+                        agent=self,
+                        test_samples=subset,
+                        config=config,
+                        ctx=sub_ctx,
+                    )
+                    cost = res_i.get("avg_total_cost_controlled")
+                    cost_f = float(cost) if isinstance(cost, (int, float)) else float("inf")
+                except Exception:
+                    cost_f = float("inf")
+                records.append({"idx": i, "avg_total_cost_controlled": cost_f, "prompt": cand})
+                if cost_f < best_cost:
+                    best_cost = cost_f
+                    best_prompt = cand
+
+            self._beergame_policy_prompt = best_prompt
+            try:
+                with open(os.path.join(ctx["resolved_save_path"], "prompt_search_results.json"), "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "prompt_search_episodes": prompt_search_episodes,
+                            "best_avg_total_cost_controlled": best_cost,
+                            "records": records,
+                        },
+                        f,
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+            except Exception:
+                pass
+
+            # persist globally for next runs
+            try:
+                with open(best_prompt_path, "w", encoding="utf-8") as f:
+                    f.write(best_prompt)
+            except Exception:
+                pass
+
         results, error_log = beergame_evaluate_run(
             agent=self,
             test_samples=test_samples,
@@ -318,6 +510,69 @@ class GEPAAgent:
         print(f"Cases: {len(test_samples)}")
         print(f"Save dir: {resolved_save_path}")
         print(f"{'='*60}\n")
+
+        # ------------------------------------------------------
+        # Prompt search on first K cases using LLM judge score
+        # ------------------------------------------------------
+        def _candidate_prompts(base: str) -> List[str]:
+            base = base or SEED_PROMPT
+            tweaks = [
+                "Focus on MECE structure and state explicit hypotheses before answering.",
+                "Be concise: lead with 2-3 key drivers, then propose a crisp next-step plan.",
+                "Quantify whenever possible: estimate ballpark numbers and sanity-check.",
+                "Clarify assumptions and ask for missing data only if critical.",
+                "Frame the answer in a top-down, bullet style to guide the interviewer.",
+            ]
+            prompts = [base]
+            for t in tweaks:
+                prompts.append(base + "\n\n[STYLE EMPHASIS]\n" + t)
+            return prompts
+
+        prompt_search_k = int(config.get("gepa_prompt_search_k", 3))
+        candidates = _candidate_prompts(self.cfg.seed_prompt or SEED_PROMPT)
+        best_prompt = candidates[0]
+        best_score = -1.0
+
+        if prompt_search_k > 0 and candidates:
+            subset = test_samples[:prompt_search_k]
+            original_prompt = self.cfg.seed_prompt
+            for idx, cand in enumerate(candidates):
+                self.cfg.seed_prompt = cand
+                tmp_log_dir = os.path.join(resolved_save_path, f"prompt_search_{idx}")
+                os.makedirs(tmp_log_dir, exist_ok=True)
+                try:
+                    cand_results, _ = evaluate_consulting_set(
+                        agent=self,
+                        test_samples=subset,
+                        config=config,
+                        log_dir=tmp_log_dir,
+                    )
+                    score = cand_results.get("metrics", {}).get("overall", 0.0) or 0.0
+                except Exception:
+                    score = 0.0
+                if score > best_score:
+                    best_score = score
+                    best_prompt = cand
+            self.cfg.seed_prompt = best_prompt
+            # 记录选择结果
+            try:
+                with open(
+                    os.path.join(resolved_save_path, "prompt_search_choice.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    json.dump(
+                        {
+                            "prompt_search_k": prompt_search_k,
+                            "best_score": best_score,
+                            "best_prompt": best_prompt,
+                        },
+                        f,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+            except Exception:
+                pass
 
         results, error_log = evaluate_consulting_set(
             agent=self,

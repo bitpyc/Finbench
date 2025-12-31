@@ -100,8 +100,13 @@ class DiscussionAgent:
         self._current_case_id = None
 
     def reply(self, case_id: str, history: List[Dict[str, str]]) -> str:
+        """
+        Consulting candidate reply using discussion workflow:
+        multiple experts propose, moderator synthesizes via DiscussionGenerator.
+        """
         turns = sum(1 for h in history if h.get("role") == "candidate")
 
+        # 最近 interviewer 提问
         last_interviewer_msg = ""
         for h in reversed(history):
             if h.get("role") == "interviewer":
@@ -114,38 +119,42 @@ class DiscussionAgent:
         ]
         transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
 
-        system = (
-            "You are the CANDIDATE in a consulting-style case interview.\n"
-            "You only see the dialogue history, not the hidden case text.\n"
-            "Act like a top-tier consulting candidate: structured, "
-            "hypothesis-driven, quantitative when possible, clear and concise.\n\n"
-            "Respond ONLY with what you would say next as the candidate.\n"
-            'Wrap your answer in a JSON object of the form:\n'
-            '  {\"reply\": \"<your answer>\"}\n'
-            "Do not include any other fields."
+        # 走 discussion 链：question=最新提问，context=全量对话
+        response_text, _, meta = self.generator.generate(
+            question=last_interviewer_msg or "(Interviewer message missing.)",
+            playbook="",
+            context=transcript_text,
+            reflection="(empty)",
+            use_json_mode=True,
+            call_id=f"consult_discussion_{case_id}_t{turns}",
+            log_dir=None,
         )
 
-        user_parts = [
-            f"Current case ID: {case_id}",
-            "",
-            "Dialogue so far (Interviewer / Candidate):",
-            transcript_text,
-            "",
-            "Interviewer just said:",
-            last_interviewer_msg or "[no interviewer message found]",
-            "",
-            "Now respond with your next candidate message, wrapped in JSON "
-            'as {\"reply\": \"...\"}.',
-        ]
-        user_prompt = "\n".join(user_parts)
+        # 解析 JSON 的 final_answer/reply，失败则回退原文本
+        reply = None
+        try:
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict):
+                reply = parsed.get("final_answer") or parsed.get("reply")
+        except Exception:
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}")
+                if 0 <= start < end:
+                    parsed = json.loads(response_text[start : end + 1])
+                    if isinstance(parsed, dict):
+                        reply = parsed.get("final_answer") or parsed.get("reply")
+            except Exception:
+                reply = None
 
-        data = self._call_llm_json(system=system, user=user_prompt)
-        reply = data.get("reply")
         if not isinstance(reply, str) or not reply.strip():
+            reply = response_text.strip()
+        if not reply:
             reply = (
-                "Let me structure the drivers, share my hypothesis, and outline the "
+                "Let me structure the drivers, share a hypothesis, and outline the "
                 "first analyses I'd run to validate it."
             )
+
         return reply.strip()
 
     # ==========================================================
@@ -154,13 +163,12 @@ class DiscussionAgent:
 
     def _decide_order_qty(self, obs: Dict[str, Any], ctx: Dict[str, Any]) -> int:
         """
-        BeerGame 单步决策（无记忆版，与 CoT 基线一致）。
-        任务特定的 query/prompt/解析由 utils.seriousgame_tools 处理。
+        BeerGame 单步决策：使用 Discussion 多专家讨论 + Moderator 综合，JSON-only，
+        解析失败回退 base_order 并打印。
         """
         role = str(ctx.get("role", obs.get("role", "retailer")))
         max_order_qty = int(getattr(self, "max_order_qty", 5000))
 
-        # baseline 订单用于兜底与范围约束
         base_order = beergame_base_rule_order(
             obs=obs,
             ctx=ctx,
@@ -174,21 +182,128 @@ class DiscussionAgent:
             base_order=base_order,
         )
 
-        # 保持“私下思考”提示但仅输出 JSON
-        user = (
-            user
-            + "\n\nThink step-by-step privately to choose the best order quantity. "
-            "Do NOT reveal your chain-of-thought. Output ONLY JSON."
+        question_text = (
+            f"{system}\n\n{user}\n\n"
+            "You must respond strictly in JSON ONLY, exactly in the form:\n"
+            "{\n"
+            '  "order_qty": <integer>,\n'
+            '  "note": "<brief rationale>"\n'
+            "}\n"
+            "No other keys. No text before or after JSON. Do NOT reveal chain-of-thought."
         )
 
-        js = self._call_llm_json(system=system, user=user)
-        order_qty, note = beergame_extract_order_and_note(
-            js=js,
+        response_text, _trace, _meta = self.generator.generate(
+            question=question_text,
+            playbook="",
+            context="",
+            reflection="",
+            use_json_mode=True,
+            call_id=f"beergame_discussion_{ctx.get('scenario_id','')}_{ctx.get('episode_id','')}_w{obs.get('week','')}",
+            log_dir=None,
+        )
+
+        order_qty = self._extract_order_qty_from_discussion(
+            response_text=response_text,
             base_order=base_order,
             max_order_qty=max_order_qty,
         )
-        self._last_beergame_note = note
         return int(order_qty)
+
+    def _extract_order_qty_from_discussion(
+        self, response_text: str, base_order: int, max_order_qty: int
+    ) -> int:
+        """从 discussion 的 JSON 文本解析订单；失败回退 base_order 并打印。"""
+        candidate = None
+        try:
+            import re
+
+            data = json.loads(response_text)
+            if isinstance(data, dict):
+                for key in (
+                    "order_qty",
+                    "order",
+                    "quantity",
+                    "final_answer",
+                    "reply",
+                    "orderQty",
+                    "decision",
+                    "final_value",
+                ):
+                    val = data.get(key)
+                    if isinstance(val, dict):
+                        for subkey in ("order_qty", "order", "quantity", "value"):
+                            subval = val.get(subkey)
+                            if isinstance(subval, (int, float)):
+                                candidate = int(subval)
+                                break
+                            if isinstance(subval, str) and subval.strip():
+                                m = re.search(r"-?\d+", subval)
+                                if m:
+                                    candidate = int(m.group(0))
+                                    break
+                        if candidate is not None:
+                            break
+                    if isinstance(val, (int, float)):
+                        candidate = int(val)
+                        break
+                    if isinstance(val, str) and val.strip():
+                        m = re.search(r"-?\d+", val)
+                        if m:
+                            candidate = int(m.group(0))
+                            break
+        except Exception:
+            try:
+                start = response_text.find("{")
+                end = response_text.rfind("}")
+                if 0 <= start < end:
+                    data = json.loads(response_text[start : end + 1])
+                    if isinstance(data, dict):
+                        import re
+
+                        for key in (
+                            "order_qty",
+                            "order",
+                            "quantity",
+                            "final_answer",
+                            "reply",
+                            "orderQty",
+                            "decision",
+                            "final_value",
+                        ):
+                            val = data.get(key)
+                            if isinstance(val, dict):
+                                for subkey in ("order_qty", "order", "quantity", "value"):
+                                    subval = val.get(subkey)
+                                    if isinstance(subval, (int, float)):
+                                        candidate = int(subval)
+                                        break
+                                    if isinstance(subval, str) and subval.strip():
+                                        m = re.search(r"-?\d+", subval)
+                                        if m:
+                                            candidate = int(m.group(0))
+                                            break
+                                if candidate is not None:
+                                    break
+                            if isinstance(val, (int, float)):
+                                candidate = int(val)
+                                break
+                            if isinstance(val, str) and val.strip():
+                                m = re.search(r"-?\d+", val)
+                                if m:
+                                    candidate = int(m.group(0))
+                                    break
+            except Exception:
+                candidate = None
+
+        if candidate is None:
+            candidate = base_order
+            print(f"[Discussion][BeerGame] parse failed, fallback to base_order={base_order}")
+
+        candidate = max(0, min(int(candidate), max_order_qty))
+        self._last_beergame_note = (
+            f"discussion_final{' (fallback_base_order)' if candidate == base_order else ''}: {response_text[:500]}"
+        )
+        return candidate
 
     def run_beergame(
         self,

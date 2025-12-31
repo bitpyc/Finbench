@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from openai import OpenAI
-
+from dotenv import load_dotenv
 # ============================================================
 # 配置与特殊标记
 # ============================================================
@@ -18,6 +18,7 @@ from openai import OpenAI
 # 面试官结束本次面试的标记（尽量不与自然语言冲突）
 INTERVIEW_END_TOKEN = "<|CASE_INTERVIEW_END|>"
 
+load_dotenv()
 # LLM 模型：默认固定为 gpt-5（可用环境变量覆盖）
 CONSULTING_LLM_MODEL = os.getenv("CONSULTING_LLM_MODEL", "deepseek-v3")
 
@@ -192,8 +193,10 @@ No extra text before or after the JSON.
 # ============================================================
 
 def _build_openai_client() -> OpenAI:
+    
     if OPENAI_BASE_URL:
         return OpenAI(api_key=API_KEY, base_url=OPENAI_BASE_URL)
+
     return OpenAI()
 
 

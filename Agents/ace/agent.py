@@ -12,7 +12,6 @@ import os
 import json
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
-
 from utils.consulting_tools import evaluate_consulting_set
 from utils.seriousgame_tools import (
     beergame_prepare_run,
@@ -322,7 +321,8 @@ class ACE:
 
         This version conditions on the current playbook and uses the same
         Generator pipeline as StructuredReasoning, so consulting can
-        benefit from accumulated playbook knowledge.
+        benefit from accumulated playbook knowledge. Adds a lightweight
+        self-reflection pass (no ground truth) to improve the answer.
         """
         # Build question/context for Generator
         question, context = self._render_consulting_candidate_prompt(case_id, history)
@@ -330,7 +330,7 @@ class ACE:
         # Decide log dir for this call
         log_dir = getattr(self, "_consulting_log_dir", None) or "."
 
-        # 我们在 consulting 里不启用 JSON mode，只要自然语言回答
+        # 初答：不启用 JSON mode，只要自然语言回答
         gen_response, bullet_ids, call_info = self.generator.generate(
             question=question,
             playbook=self.playbook,
@@ -341,7 +341,42 @@ class ACE:
             log_dir=log_dir,
         )
 
-        reply = (gen_response or "").strip()
+        # 轻量自评：无 ground truth，使用 reflector 做自我批改
+        reflection_content = ""
+        try:
+            question_for_reflection = self._strip_task_instruction(question)
+            reflection_content, _, _ = self.reflector.reflect(
+                question=question_for_reflection,
+                reasoning_trace=gen_response,
+                predicted_answer=gen_response,
+                ground_truth=None,
+                environment_feedback="Check correctness, structure, and quantitative rigor.",
+                bullets_used="(none)",
+                use_ground_truth=False,
+                use_json_mode=False,
+                call_id=f"consult_case_{case_id}_turn_{len(history)}_reflect",
+                log_dir=log_dir,
+            )
+        except Exception:
+            reflection_content = ""
+
+        # 若有反思内容，按反思重写一遍
+        final_response = gen_response
+        if reflection_content:
+            try:
+                final_response, _, _ = self.generator.generate(
+                    question=question,
+                    playbook=self.playbook,
+                    context=context,
+                    reflection=reflection_content,
+                    use_json_mode=False,
+                    call_id=f"consult_case_{case_id}_turn_{len(history)}_rewrite",
+                    log_dir=log_dir,
+                )
+            except Exception:
+                final_response = gen_response
+
+        reply = (final_response or "").strip()
         if not reply:
             reply = (
                 "Let me outline the key drivers, propose a hypothesis, and the first "
@@ -468,7 +503,8 @@ class ACE:
 
         This implementation:
         - uses task-specific helpers from utils.seriousgame_tools
-        - does NOT use ACE playbook / memory (pure policy from observation)
+        - uses ACE workflow: Analyze (generator) -> Critique (reflector) -> Enhance (generator)
+        - optionally curates the playbook for future steps (persistent strategy memory)
         """
         role = str(ctx.get("role", obs.get("role", "retailer")))
 
@@ -479,8 +515,9 @@ class ACE:
             max_order_qty=getattr(self, "max_order_qty", 5000),
         )
 
-        # No retrieval / external memory for ACE BeerGame at the moment
-        retrieved = ""
+        # Use playbook as persistent "retrieved" guidance (truncate to avoid prompt blow-up)
+        playbook_text = getattr(self, "playbook", "") or ""
+        retrieved = playbook_text[:6000] if isinstance(playbook_text, str) else ""
 
         system, user = beergame_render_prompt(
             role=role,
@@ -489,15 +526,112 @@ class ACE:
             base_order=base_order,
         )
 
-        js = self._call_llm_json(system=system, user=user)
-        order_qty, note = beergame_extract_order_and_note(
-            js=js,
-            base_order=base_order,
-            max_order_qty=getattr(self, "max_order_qty", 5000),
+        max_order_qty = int(getattr(self, "max_order_qty", 5000))
+
+        # -----------------------
+        # 1) Analyze (Generator)
+        # -----------------------
+        gen_user = (
+            user
+            + "\n\n"
+            + "ACE Analyze: Propose an order quantity.\n"
+              "Output JSON ONLY, exactly {\"order_qty\": <int>, \"note\": \"...\"}.\n"
+              "Keep note short. No extra keys. No extra text."
         )
-        self._last_beergame_note = note
-        # `note` currently unused (no memory), but kept for parity with AMem version
-        return int(order_qty)
+        js1 = self._call_llm_json(system=system, user=gen_user)
+        order1, note1 = beergame_extract_order_and_note(
+            js=js1,
+            base_order=base_order,
+            max_order_qty=max_order_qty,
+        )
+
+        # -----------------------
+        # 2) Critique (Reflector)
+        # -----------------------
+        try:
+            # BeerGame没有ground truth，这里仅做“健壮性/风险”反思
+            question_for_reflection = f"[BeerGame] role={role} week={obs.get('week')} obs={json.dumps(obs, ensure_ascii=False)}"
+            reasoning_trace = f"note={note1}"
+            predicted_answer = json.dumps({"order_qty": order1, "note": note1}, ensure_ascii=False)
+            environment_feedback = (
+                "No immediate ground truth. Critique whether the order balances inventory vs backlog, "
+                "avoids overreaction/bullwhip, and respects the baseline as a safe fallback."
+            )
+            reflection_content, bullet_tags, _ = self.reflector.reflect(
+                question=question_for_reflection,
+                reasoning_trace=reasoning_trace,
+                predicted_answer=predicted_answer,
+                ground_truth=None,
+                environment_feedback=environment_feedback,
+                bullets_used=[],
+                use_ground_truth=False,
+                use_json_mode=False,
+                call_id=f"beergame_reflect_{ctx.get('scenario_id','')}_{ctx.get('episode_id','')}_w{obs.get('week','')}",
+                log_dir=getattr(self, "_beergame_log_dir", None),
+            )
+
+            # Update playbook bullet stats if reflector produced tags
+            if bullet_tags:
+                self.playbook = update_bullet_counts(self.playbook, bullet_tags)
+
+            # Cache reflections for curator
+            pending = getattr(self, "_beergame_pending_reflections", None)
+            if pending is None:
+                pending = []
+                setattr(self, "_beergame_pending_reflections", pending)
+            if isinstance(reflection_content, str) and reflection_content.strip():
+                pending.append(reflection_content.strip())
+
+            # Optional curator: update playbook periodically
+            steps_since = int(getattr(self, "_beergame_steps_since_curate", 0))
+            steps_since += 1
+            setattr(self, "_beergame_steps_since_curate", steps_since)
+            freq = max(int(getattr(self, "beergame_curator_frequency", 5)), 1)
+            if steps_since >= freq:
+                merged_reflection = "\n\n".join(pending[-5:])  # cap context
+                stats = get_playbook_stats(self.playbook)
+                token_budget = int(getattr(self, "_beergame_token_budget", 40000))
+                total_steps = int(getattr(self, "_beergame_total_steps_hint", steps_since))
+                self.playbook, self.next_global_id, _ops, _ = self.curator.curate(
+                    current_playbook=self.playbook,
+                    recent_reflection=merged_reflection,
+                    question_context=question_for_reflection,
+                    current_step=steps_since,
+                    total_samples=total_steps,
+                    token_budget=token_budget,
+                    playbook_stats=stats,
+                    use_ground_truth=False,
+                    use_json_mode=False,
+                    call_id=f"beergame_curate_{ctx.get('scenario_id','')}_{ctx.get('episode_id','')}_w{obs.get('week','')}",
+                    log_dir=getattr(self, "_beergame_log_dir", None),
+                    next_global_id=self.next_global_id,
+                )
+                setattr(self, "_beergame_steps_since_curate", 0)
+                setattr(self, "_beergame_pending_reflections", [])
+        except Exception:
+            reflection_content = ""
+
+        # -----------------------
+        # 3) Enhance (Generator)
+        # -----------------------
+        enhance_user = (
+            user
+            + "\n\n"
+            + "ACE Enhance: You have a candidate decision and a critique. Refine the order if needed.\n"
+            + f"Candidate decision JSON: {json.dumps({'order_qty': order1, 'note': note1}, ensure_ascii=False)}\n"
+            + f"Critique:\n{reflection_content or '(no critique)'}\n\n"
+            + "Return JSON ONLY, exactly {\"order_qty\": <int>, \"note\": \"...\"}. No extra keys."
+        )
+        js2 = self._call_llm_json(system=system, user=enhance_user)
+        order2, note2 = beergame_extract_order_and_note(
+            js=js2,
+            base_order=order1,  # if enhance fails, fall back to analyzed decision first
+            max_order_qty=max_order_qty,
+        )
+
+        # Final note for logging
+        self._last_beergame_note = note2 or note1
+        return int(order2)
 
     def run_beergame(
         self,
@@ -526,6 +660,19 @@ class ACE:
             max_order = getattr(self, "max_order_qty", 5000)
         self.max_order_qty = int(max_order)
 
+        # Setup persistent BeerGame playbook path (shared across runs)
+        save_dir = str((config or {}).get("save_dir", "results"))
+        pb_path = str(beergame_cfg.get("playbook_path") or os.path.join(save_dir, "ace_beergame_playbook.md"))
+        self._beergame_playbook_path = pb_path
+        try:
+            if os.path.exists(pb_path):
+                with open(pb_path, "r", encoding="utf-8") as f:
+                    txt = f.read()
+                if txt.strip():
+                    self.playbook = txt
+        except Exception:
+            pass
+
         ctx = beergame_prepare_run(
             mode=mode,
             test_samples=test_samples,
@@ -533,6 +680,21 @@ class ACE:
             allowed_modes=self.SUPPORTED_MODES,
             agent_method=self.agent_method,
         )
+        # expose log dir to reflector/curator for troubleshooting
+        self._beergame_log_dir = ctx.get("log_dir")
+        # reset counters for this run
+        self.beergame_curator_frequency = int(beergame_cfg.get("curator_frequency", getattr(self, "beergame_curator_frequency", 5)))
+        self._beergame_token_budget = int(beergame_cfg.get("playbook_token_budget", getattr(self, "_beergame_token_budget", 40000)))
+        self._beergame_total_steps_hint = int(beergame_cfg.get("total_steps_hint", 25))
+        self._beergame_steps_since_curate = 0
+        self._beergame_pending_reflections = []
+
+        # Save initial playbook snapshot in this run dir
+        try:
+            with open(os.path.join(ctx["resolved_save_path"], "initial_playbook.md"), "w", encoding="utf-8") as f:
+                f.write(self.playbook)
+        except Exception:
+            pass
         results, error_log = beergame_evaluate_run(
             agent=self,
             test_samples=test_samples,
@@ -545,6 +707,18 @@ class ACE:
             config=config or {},
             ctx=ctx,
         )
+
+        # Save final playbook snapshot + persist global playbook
+        try:
+            with open(os.path.join(ctx["resolved_save_path"], "final_playbook.md"), "w", encoding="utf-8") as f:
+                f.write(self.playbook)
+        except Exception:
+            pass
+        try:
+            with open(pb_path, "w", encoding="utf-8") as f:
+                f.write(self.playbook)
+        except Exception:
+            pass
         return results
 
     # ==========================================================

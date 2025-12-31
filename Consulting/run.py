@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
-def load_consulting_cases(data_path: str) -> List[Dict[str, Any]]:
+def load_consulting_cases(data_path: str, num_cases: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     根据当前 agsm_cases_all.json 的格式加载咨询案例。
 
@@ -85,8 +85,12 @@ def load_consulting_cases(data_path: str) -> List[Dict[str, Any]]:
                 "meta": s.get("meta", {}),
             }
         )
-    # 目前仍然只取前 3 个样本，如需全量评测可去掉 [:3]
-    return normalized[:3]
+    # 可选：限制评测样本数（用于快速冒烟测试）。默认 None 表示全量。
+    if num_cases is None:
+        return normalized
+    if num_cases <= 0:
+        return []
+    return normalized[:num_cases]
 
 
 def main():
@@ -96,6 +100,12 @@ def main():
         type=str,
         required=True,
         help="Path to consulting cases (json/jsonl).",
+    )
+    parser.add_argument(
+        "--num_cases",
+        type=int,
+        default=None,
+        help="Optional: limit number of cases for quick runs (default: run all cases in data_path).",
     )
     parser.add_argument(
         "--api_provider",
@@ -137,7 +147,18 @@ def main():
         "--agent_method",
         type=str,
         default="amem",
-        choices=["amem", "ace", "cot", "mem0"],
+        choices=[
+            "amem",
+            "ace",
+            "cot",
+            "mem0",
+            "self_refine",
+            "reflexion",
+            "debate",
+            "discussion",
+            "dynamic_cheatsheet",
+            "gepa",
+        ],
         help="Agent method to use for consulting evaluation.",
     )
     parser.add_argument(
@@ -179,7 +200,7 @@ def main():
     args = parser.parse_args()
 
     # 1) 加载 / 标准化数据 -> test_samples
-    test_samples = load_consulting_cases(args.data_path)
+    test_samples = load_consulting_cases(args.data_path, num_cases=args.num_cases)
 
     # 2) 根据 agent_method 构造对应 Agent
     if args.agent_method == "cot":
@@ -210,6 +231,67 @@ def main():
             generator_model=args.generator_model,
             max_tokens=args.max_tokens,
             agent_method="mem0",
+        )
+
+    elif args.agent_method == "self_refine":
+        from Agents.self_refine import SelfRefineAgent
+
+        agent = SelfRefineAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="self_refine",
+        )
+
+    elif args.agent_method == "reflexion":
+        from Agents.reflexion import ReflexionAgent
+
+        agent = ReflexionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="reflexion",
+        )
+
+    elif args.agent_method == "debate":
+        from Agents.debate import DebateAgent
+
+        agent = DebateAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="debate",
+        )
+
+    elif args.agent_method == "discussion":
+        from Agents.discussion import DiscussionAgent
+
+        agent = DiscussionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="discussion",
+        )
+
+    elif args.agent_method == "dynamic_cheatsheet":
+        from Agents.dynamic_cheatsheet import DynamicCheatsheetAgent
+
+        agent = DynamicCheatsheetAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="dynamic_cheatsheet",
+        )
+
+    elif args.agent_method == "gepa":
+        from Agents.gepa.agent import GEPAAgent
+
+        agent = GEPAAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=args.reflector_model or args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method="gepa",
         )
 
     elif args.agent_method == "ace":
