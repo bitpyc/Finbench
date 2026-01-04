@@ -1,98 +1,93 @@
-# FirmBench
+# FirmBench: A Benchmark for Strategic Reasoning and Decision-Making of LLM Agents in Enterprise Simulation
 
-<!-- Introduction 暂略 -->
+FirmBench is a comprehensive benchmarking platform specifically designed to evaluate the **strategic reasoning and decision-making capabilities** of Large Language Model (LLM) agents in complex enterprise scenarios. Unlike traditional static QA benchmarks, FirmBench introduces interactive consulting cases and dynamic serious games to authentically simulate information asymmetry, sequential feedback, and long-term planning challenges inherent in corporate decision-making.
 
-## Quick Start（仅 Online 模式）
+---
 
-下面以 **StructuredReasoning** 与 **Consulting** 两个子基准为例说明如何运行 Online 实验、以及如何汇总 capability / difficulty 维度的结果。
+## Core Components
 
-> 约定：所有命令都在仓库根目录执行（即本仓库顶层目录）。
+### 1. Structured Reasoning
+This module comprises 10 curated financial and logical reasoning datasets to assess the foundational cognitive abilities of agents. Tasks range from extracting key information from financial reports to complex numerical calculations and the application of professional domain knowledge.
+- **Datasets included**: FinQA, TAT-QA, ConvFinQA, finer, FinKnow, FormulaEval, and more.
+- **Evaluation Domains**: Information Extraction, Numerical Calculation, Domain Knowledge.
+- **Run scripts**: `run_scripts/StructuredReasoning/online/`
 
-### 0) 前置准备
+### 2. Consulting
+This module simulates management consulting case interviews. Agents act as interviewees and must engage in multi-turn interactions with an LLM-based interviewer to proactively acquire hidden information before providing structured business recommendations.
+- **Features**: Emphasizes structured problem-solving, information acquisition, quantitative analysis, and business intuition.
+- **Scoring Dimensions**: Structure, Quantitative Reasoning, Business Sense, Communication.
+- **Run scripts**: `run_scripts/Consulting/online/`
 
-- **Python**：确保可用 `python` / `python3`（建议 Python 3.10+）。
-- **LLM 调用配置**：脚本中默认使用 `--api_provider usd_guiji`（以及对应模型名），请按你的环境配置好对应的密钥/网关/SDK。
-- **Online 模式数据**：Online 模式只会用到各任务的 **`*_test.jsonl`**（例如 `StructuredReasoning/data/*_test.jsonl`）。
+### 3. Serious Game
+This module includes two dynamic simulation environments to evaluate agents' long-term strategic planning under uncertainty and delayed feedback.
+- **Beer Game**: A classic supply chain management simulation where agents manage inventory to minimize total costs while dealing with the bullwhip effect and demand fluctuations.
+- **Enterprise Digital Twin (EDT)**: A high-fidelity business process simulation where agents act as CEOs, making cross-functional operational decisions to maximize accumulated earnings.
+- **Run scripts**: `run_scripts/SeriousGame/`
 
-### 1) 生成 capability / difficulty 划分（LLM reclassify）
+---
 
-在做 capability/difficulty 维度汇总之前，需要先对样本做 LLM 重标注，产物会写入：
+## Agent-based Taxonomy
 
-- `results/StructuredReasoning_run/llm_reclassify_mode/<output_name>/<split>/classifications.jsonl`
+FirmBench proposes an agent-centric classification framework. Using an expert model, all samples are re-annotated based on required cognitive capabilities and difficulty scores, enabling fine-grained performance diagnosis beyond traditional dataset boundaries.
 
-运行（Online 模式通常只需要 `test`）：
+- **Information Extraction (IE)**: Accurately retrieving facts from documents.
+- **Numerical Calculation (NC)**: Mathematical reasoning involving arithmetic logic or code synthesis.
+- **Domain Knowledge (DK)**: Specialized financial terminology, standards (e.g., XBRL), and industry common sense.
+- **Complex Reasoning (CR)**: Handling situational ambiguity, strategic choices, and interactive decision-making.
 
+---
+
+## Quick Start
+
+### 0. Preparation
+Ensure your Python environment is version 3.10+ and install dependencies:
+```bash
+pip install -r requirements.txt
+```
+Configure your LLM API (supports various providers; see script parameters for details).
+
+### 1. Task Reclassification
+Before running experiments, categorize and score the difficulty of the task samples:
 ```bash
 bash run_scripts/StructuredReasoning/data_process/reclassify_test.sh
 ```
 
-如果你希望显式复现（不依赖 bash 脚本），可以直接运行 `utils/llm_reclassify.py`：
+### 2. Run Agent Experiments
+You can choose to run specific agents or the entire benchmark suite:
+- **Run all Structured Reasoning experiments**:
+  ```bash
+  bash run_scripts/StructuredReasoning/online/run_all_agents_online.sh
+  ```
+- **Run Consulting task experiments**:
+  ```bash
+  bash run_scripts/Consulting/online/run_all_online.sh
+  ```
+- **Run Serious Game experiments**:
+  ```bash
+  python SeriousGame/run_beergame.py
+  python SeriousGame/run_edt.py
+  ```
 
-```bash
-python3 -m utils.llm_reclassify \
-  --config_path StructuredReasoning/data/task_config.json \
-  --split test \
-  --output_name capability_difficulty_score_v1_merged_finer_try50 \
-  --output_root results/StructuredReasoning_run/llm_reclassify_mode
-```
-
-可选（如你也需要 train/val 的标注）：
-
-```bash
-bash run_scripts/StructuredReasoning/data_process/reclassify_train.sh
-bash run_scripts/StructuredReasoning/data_process/reclassify_valid.sh
-```
-
-### 2) StructuredReasoning：运行各智能体 Online 实验
-
-StructuredReasoning 的 Online 脚本位于 `run_scripts/StructuredReasoning/online/<agent_method>/*.sh`，
-运行后会在 `results/StructuredReasoning_run/<Task>/<agent_method>/online/<timestamp>/` 下生成对应的 `test_results.json` 等文件。
-
-为了避免读者逐个 `bash`，可以一键启动所有 agent 的 Online 脚本（会排除 `capability_eval` 目录）：
-
-```bash
-bash run_scripts/StructuredReasoning/online/run_all_agents_online.sh
-```
-
-> 说明：这些脚本大多使用 `nohup ... &` 后台启动，会同时起很多进程；如需控制规模，请自行挑选 agent 或数据集脚本运行。
-
-### 3) StructuredReasoning：按 capability / difficulty 汇总 Online 结果
-
-当 `results/StructuredReasoning_run/**/online/**/test_results.json` 已生成，并且第 1 步的 `classifications.jsonl` 已准备好后，运行：
-
+### 3. Result Synthesis and Evaluation
+Once experiments are completed, use the capability evaluation script to generate statistical tables:
 ```bash
 bash run_scripts/StructuredReasoning/online/capability_eval/online/capability_eval_online.sh
 ```
 
-该脚本本质上是在调用 `utils/capability_eval.py`。如果你希望显式复现（不依赖 bash 脚本），可直接运行：
+---
 
-```bash
-python3 -m utils.capability_eval \
-  --results_root results/StructuredReasoning_run \
-  --classify_root results/StructuredReasoning_run/llm_reclassify_mode/capability_difficulty_score_v1_merged_finer_try50 \
-  --out_dir results/StructuredReasoning_run/capability_eval_mode \
-  --only_mode online \
-  --export_csv
+## FirmAgent (Agent-of-Agents)
+
+FirmAgent is our proposed adaptive routing ensemble framework. By analyzing the execution traces of various base agents across diverse tasks, it learns and synthesizes routing rules to dynamically assign new samples to the most specialized agent.
+
+For more details, please refer to: [docs/AOA.md](docs/AOA.md)
+
+---
+
+## Citation
+
+If you use FirmBench in your research, please cite our paper:
+
+```bibtex
+
 ```
-
-默认输出目录：
-
-- `results/StructuredReasoning_run/capability_eval_mode/`
-- CSV 表格通常会在：`results/StructuredReasoning_run/capability_eval_mode/_tables/online/<timestamp>/capability_eval.csv`
-
-### 4) Consulting：运行各智能体 Online 实验
-
-Consulting 的 Online 脚本位于 `run_scripts/Consulting/online/*.sh`，运行后会在 `results/Consulting/<agent_method>/online/<timestamp>/` 生成 `test_results.json` 等文件。
-
-同样提供一键启动：
-
-```bash
-bash run_scripts/Consulting/online/run_all_online.sh
-```
-
-## AOA（Agent-of-Agents）
-
-AOA 的经验提取、离线/规则/LLM 路由评测与命令用法请看：
-- `docs/AOA.md`
-
-
