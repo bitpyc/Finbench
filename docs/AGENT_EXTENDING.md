@@ -1,73 +1,73 @@
-# Agents 扩展规范（详细版）
+# Agent Extension Specification (Detailed Version)
 
-本文档旨在帮助**未接触过本项目**的开发者快速理解 Agent 扩展流程。内容覆盖架构全景、接口约定、样例代码、脚本联动与验证 checklist，确保新方法可以快捷落地。
+This document is designed to help developers who are **new to this project** quickly understand the process for extending Agents. It covers the overall architecture, interface conventions, sample code, script integration, and a validation checklist to ensure new methods can be implemented efficiently.
 
 ---
 
-## 1. 全局架构速览
+## 1. Global Architecture Overview
 
 ```
-CLI (bizbench/run.py)
-├── 解析命令行参数 (--agent_method / --task_name / --mode / ...)
-├── 加载配置 + 数据 → DataProcessor
-└── 根据 agent_method 分派到 Agents/ 子包
+CLI (StructuredReasoning/run.py)
+├── Parse command line arguments (--agent_method / --task_name / --mode / ...)
+├── Load configuration + Data → DataProcessor
+└── Dispatch to Agents/ subpackages based on agent_method
 
 Agents/
-├── ace/  → 完整 ACE 流程：Generator → Reflector → Curator
-└── cot/  → 轻量 Baseline：单 Generator + 统一 Prompt
+├── ace/  → Full ACE process: Generator → Reflector → Curator
+└── cot/  → Lightweight Baseline: Single Generator + Unified Prompt
 
 DataProcessor
-└── 负责样本预处理、答案判定、准确率计算
+└── Responsible for sample preprocessing, answer determination, and accuracy calculation
 
 Results
 └── <save_path>/<task>/<agent>/<mode>/<timestamp>/...
 ```
 
-### 流程对比（ACE vs CoT）
+### Process Comparison (ACE vs. CoT)
 
-| 步骤 | ACE | CoT baseline |
+| Step | ACE | CoT Baseline |
 | --- | --- | --- |
-| Prompt | 三角色不同 Prompt（详见 `Agents/ace/prompts/`） | 单 Prompt，输出 JSON（`Agents/cot/generator.py`） |
-| 反馈循环 | 生成 → 反思 → 策展 | 无反馈，单次生成 |
-| 支持模式 | offline / online / eval_only | online / eval_only（可扩展） |
-| 结果 | `final_results.json`、`train_results.json` 等 | `test_results.json` + `run_config.json` |
+| Prompt | Different prompts for three roles (see `Agents/ace/prompts/`) | Single prompt, JSON output (`Agents/cot/generator.py`) |
+| Feedback Loop | Generate → Reflect → Curate | No feedback, single-pass generation |
+| Supported Modes | offline / online / eval_only | online / eval_only (extensible) |
+| Results | `final_results.json`, `train_results.json`, etc. | `test_results.json` + `run_config.json` |
 
 ---
 
 ## 2. Quick Start Checklist
 
-1. 阅读本文档，确认需要支持的模式与功能。
-2. 在 `Agents/` 下创建新子包，仿照 `ace` / `cot`。
-3. 实现核心组件 & Agent 类，遵守统一接口。
-4. 修改 `bizbench/run.py` 将 `--agent_method` 映射到新 Agent。
-5. 更新相应 shell 脚本（如有需要）。
-6. 执行 smoke test，确认目录结构与结果输出正常。
-7. 文档化使用方式（README / docs）。
+1. Read this document to confirm the required modes and functionalities.
+2. Create a new subpackage under `Agents/`, following the pattern of `ace` or `cot`.
+3. Implement core components & the Agent class, adhering to the unified interface.
+4. Modify `StructuredReasoning/run.py` to map `--agent_method` to your new Agent.
+5. Update corresponding shell scripts (if necessary).
+6. Perform a smoke test to confirm that directory structure and result output are normal.
+7. Document usage in the README or docs.
 
 ---
 
-## 3. 目录结构与职责详情
+## 3. Directory Structure and Responsibilities
 
 ```
 Agents/
-├── __init__.py                       # 统一导出
+├── __init__.py                       # Unified export
 ├── ace/
-│   ├── ace.py                        # ACE System 主类
-│   ├── core/                         # Generator / Reflector / Curator 实现
-│   └── prompts/                      # 三角色 Prompt 模板
+│   ├── ace.py                        # ACE System main class
+│   ├── core/                         # Generator / Reflector / Curator implementation
+│   └── prompts/                      # Prompt templates for three roles
 └── cot/
-    ├── agent.py                      # CoT Agent（run() 逻辑）
+    ├── agent.py                      # CoT Agent (run() logic)
     └── generator.py                  # Prompt builder + timed_llm_call
 ```
 
-- **BizBench 入口**：`bizbench/run.py` 通过 `--agent_method` 选择 Agent；ACE 默认，CoT 作为 baseline。
-- **结果目录规范**：所有 Agent 写入 `save_dir/<task>/<agent>/<mode>/<timestamp>/`，并在 `run_config.json` 中记录 `run_subdir`，便于追踪。
+- **StructuredReasoning Entry Point**: `StructuredReasoning/run.py` selects the Agent via `--agent_method`; ACE is the default, and CoT serves as a baseline.
+- **Result Directory Standard**: All Agents write to `save_dir/<task>/<agent>/<mode>/<timestamp>/`, and record the `run_subdir` in `run_config.json` for tracking.
 
 ---
 
-## 4. 统一接口与代码模板
+## 4. Unified Interface and Code Template
 
-### 4.1 Agent 构造签名
+### 4.1 Agent Constructor Signature
 
 ```python
 class YourAgent:
@@ -80,12 +80,12 @@ class YourAgent:
         **kwargs,
     ):
         self.agent_method = agent_method
-        self.generator = ...  # 初始化模型 client
+        self.generator = ...  # Initialize model client
 ```
 
-> 如需 Reflector/Curator，可在此处依次初始化。
+> If Reflector/Curator are needed, initialize them here sequentially.
 
-### 4.2 run() 方法骨架
+### 4.2 run() Method Skeleton
 
 ```python
 def run(
@@ -97,7 +97,7 @@ def run(
     data_processor,
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    supported = {"online", "eval_only"}  # 根据需求调整
+    supported = {"online", "eval_only"}  # Adjust as needed
     if mode not in supported:
         raise ValueError(f"{self.agent_method} only supports {supported}")
 
@@ -108,10 +108,10 @@ def run(
     resolved_save_path = os.path.join(save_dir, run_subdir)
     os.makedirs(resolved_save_path, exist_ok=True)
 
-    # 执行主要逻辑（评测 / 训练）
+    # Execute main logic (evaluation / training)
     results, error_log = evaluate_test_set(...)
 
-    # 写入配置与结果
+    # Write configuration and results
     with open(os.path.join(resolved_save_path, "run_config.json"), "w") as f:
         json.dump({"config": config, "run_subdir": run_subdir}, f, indent=2)
 
@@ -121,7 +121,7 @@ def run(
     return results
 ```
 
-### 4.3 Prompt 示例（CoT）
+### 4.3 Prompt Example (CoT)
 
 ```python
 prompt_lines = [
@@ -141,15 +141,15 @@ prompt_lines = [
 ]
 ```
 
-> 统一输出格式可直接被 `utils.extract_answer()` 解析。
+> Unified output formats can be directly parsed by `utils.extract_answer()`.
 
 ---
 
-## 5. BizBench 入口对接
+## 5. StructuredReasoning Entry Point Integration
 
-### 5.1 命令行参数
+### 5.1 Command Line Arguments
 
-`bizbench/run.py` 中的 `--agent_method` 需包含新方法，例如：
+`StructuredReasoning/run.py` must include the new method in `--agent_method`, for example:
 
 ```python
 parser.add_argument(
@@ -159,7 +159,7 @@ parser.add_argument(
 )
 ```
 
-### 5.2 main() 分支
+### 5.2 main() Branching
 
 ```python
 if args.agent_method == "ace":
@@ -173,17 +173,17 @@ else:
     new_agent.run(...)
 ```
 
-### 5.3 Shell 脚本
+### 5.3 Shell Scripts
 
-`run_scripts/binbenzh/...` 中的脚本已经变量化，新增 agent 时可参照以下模板：
+Scripts in `run_scripts/StructuredReasoning/...` are parameterized. New agents can follow this template:
 
 ```bash
-BENCHMARK_MODULE="bizbench.run"
-BENCHMARK_NAME="bizbench"
+BENCHMARK_MODULE="StructuredReasoning.run"
+BENCHMARK_NAME="StructuredReasoning"
 AGENT_METHOD="your_agent"
 TASK_NAME="CodeFinQA"
 MODE="online"
-CONFIG_PATH="bizbench/data/task_config.json"
+CONFIG_PATH="StructuredReasoning/data/task_config.json"
 SAVE_PATH="results/${BENCHMARK_NAME}_run"
 LOG_NAME="${BENCHMARK_NAME}_run_${TASK_NAME}_${AGENT_METHOD}_${MODE}.log"
 
@@ -199,71 +199,70 @@ nohup python -m "${BENCHMARK_MODULE}" \
 
 ---
 
-## 6. DataProcessor 与工具复用
+## 6. DataProcessor and Tool Reuse
 
-- **DataProcessor 职责**（位于 `bizbench/data_processor.py`）：
-  - `process_task_data`：将原始样本转为标准字段（context/question/target）。
-  - `answer_is_correct(pred, target)`：判断模型输出是否正确。
-  - `evaluate_accuracy(answers, targets)`：统计准确率。
-- **评测工具**：`utils.evaluate_test_set()` 会调用 `generator.generate()`、解析输出并交给 DataProcessor 判分。所有 Agent 建议复用该函数，以获得一致的 `test_results` 格式。
-- **模型输出**：确保 Prompt 的 `final_answer` 字段能被 `utils.extract_answer()` 提取；如有自定义格式，需同步修改解析逻辑。
-
----
-
-## 7. 注意事项
-
-1. **模式支持**：如不支持 `offline`，需显式 `raise ValueError`，避免静默错误。
-2. **API Client**：推荐使用 `utils.initialize_clients(api_provider)` 初始化，保证与 ACE 一致的重试/日志策略。
-3. **日志与错误**：
-   - ACE 使用 `logger.py` 记录细粒度调用；轻量 Agent 至少打印关键节点（启动、样本数、准确率）。
-   - `timed_llm_call()` 已内置重试与问题请求记录，可复用。
-4. **结果命名**：
-   - 必须生成 `run_config.json`（含 `run_subdir`），`test_results.json`，必要时包含 `final_results.json`、`train_results.json` 等。
-5. **Prompt 约束**：无外部记忆/知识时，需在 Prompt 中明确说明，避免模型引用不存在的内容（如 CoT 的 `bullet_ids` 永远为空）。
-6. **目录结构**：任何新 Agent 都应遵循 `<task>/<agent>/<mode>/<timestamp>`，以便离线结果管理工具（如 `results/bizbench_run/...`）自动识别。
+- **DataProcessor Responsibilities** (located in `StructuredReasoning/data_processor.py`):
+  - `process_task_data`: Converts raw samples into standard fields (context/question/target).
+  - `answer_is_correct(pred, target)`: Determines if model output is correct.
+  - `evaluate_accuracy(answers, targets)`: Calculates accuracy.
+- **Evaluation Utilities**: `utils.evaluate_test_set()` calls `generator.generate()`, parses the output, and submits it to DataProcessor for scoring. All Agents are encouraged to reuse this function for consistent `test_results` formatting.
+- **Model Output**: Ensure that the `final_answer` field in the prompt can be extracted by `utils.extract_answer()`; if using a custom format, update the parsing logic accordingly.
 
 ---
 
-## 8. 模式说明（offline / online / eval_only）
+## 7. Important Considerations
 
-- **offline**：一次性训练+评测流程。先用 `train` 数据完成全部训练/微调，训练结束后再用 `test` 数据做单次评测；测试集不参与训练。
-- **online**：窗口化的“先测后训”循环。将 `test` 样本按窗口切分（例如每 N 条或按时间分片）；对每个窗口先使用当前模型进行评测，随后立刻用该窗口及其标注做增量训练/微调；进入下一窗口时，模型需累积此前窗口的训练成果，保持时间顺序。
-- **eval_only**：纯评测模式，不做任何训练，直接用全部 `test` 数据评测。
+1. **Mode Support**: If `offline` is not supported, explicitly `raise ValueError` to avoid silent failures.
+2. **API Client**: It is recommended to use `utils.initialize_clients(api_provider)` for initialization to ensure consistent retry/logging policies with ACE.
+3. **Logging and Errors**:
+   - ACE uses `logger.py` for fine-grained call logging; lightweight Agents should at least print key events (startup, sample count, accuracy).
+   - `timed_llm_call()` has built-in retries and problem request recording.
+4. **Result Naming**:
+   - Must generate `run_config.json` (with `run_subdir`), `test_results.json`, and if applicable, `final_results.json`, `train_results.json`, etc.
+5. **Prompt Constraints**: When no external memory/knowledge is available, clearly state this in the prompt to avoid hallucinations (e.g., CoT `bullet_ids` should always be empty).
+6. **Directory Structure**: Every new Agent must follow the `<task>/<agent>/<mode>/<timestamp>` pattern so that result management tools can automatically identify them.
 
 ---
 
-## 9. 验证 Checklist
+## 8. Mode Descriptions (offline / online / eval_only)
 
-1. **命令行运行**  
+- **offline**: A one-time train-then-evaluate process. First, use `train` data to complete all training/fine-tuning, then use `test` data for a single evaluation. The test set does not participate in training.
+- **online**: A windowed "test-then-train" cycle. The `test` samples are split into windows (e.g., every N samples or by time slices). Each window is first evaluated using the current model, then immediately used for incremental training/fine-tuning. When moving to the next window, the model accumulates training results from previous windows, maintaining chronological order.
+- **eval_only**: Pure evaluation mode. No training is performed; evaluation is conducted using the entire `test` dataset.
+
+---
+
+## 9. Validation Checklist
+
+1. **Command Line Execution**  
    ```bash
-   python -m bizbench.run \
+   python -m StructuredReasoning.run \
      --agent_method your_agent \
      --task_name FinCode \
      --mode online \
-     --save_path results/bizbench_run \
-     --config_path bizbench/data/task_config.json
+     --save_path results/StructuredReasoning_run \
+     --config_path StructuredReasoning/data/task_config.json
    ```
-2. **目录检查**  
-   - `results/bizbench_run/FinCode/your_agent/online/<timestamp>/` 是否存在。
-   - `run_config.json` 中是否记录 `run_subdir` 和正确配置。
-3. **结果文件**  
-- `test_results.json` / `final_results.json`（如适用）格式正确，可读。
-- `detailed_llm_logs/` 等日志目录是否创建。
-4. **日志输出**  
-   - 控制台/日志文件中是否包含启动提示、样本数、准确率等关键信息。
-5. **Glue 脚本**  
-   - 如有对应 shell 脚本，`nohup` 输出是否指向正确日志文件。
-6. **断言**  
-   - 如果 Agent 不支持某模式，运行时是否会抛出友好的错误信息。
+2. **Directory Check**  
+   - Verify `results/StructuredReasoning_run/FinCode/your_agent/online/<timestamp>/` exists.
+   - Check `run_config.json` for recorded `run_subdir` and correct configuration.
+3. **Result Files**  
+   - `test_results.json` / `final_results.json` (if applicable) are correctly formatted and readable.
+   - Log directories like `detailed_llm_logs/` are created.
+4. **Log Output**  
+   - Console/log files contain key information such as startup messages, sample counts, and accuracy.
+5. **Glue Scripts**  
+   - If corresponding shell scripts exist, ensure `nohup` output points to the correct log file.
+6. **Assertions**  
+   - If an Agent does not support a mode, verify that it throws a friendly error message when run.
 
-通过以上步骤，即可确认新的 Agent 方法已完整融入当前 BizBench 体系。
+Following these steps confirms that the new Agent method is fully integrated into the current StructuredReasoning framework.
 
 ---
 
-## 10. 示例参考
+## 10. Reference Examples
 
-- **ACE**：`Agents/ace/ace.py`（多角色协作，含多阶段生成与反思）；适合需要复杂记忆管理的 Agent。
-- **CoT**：`Agents/cot/agent.py` + `generator.py`（单 Prompt Baseline）；适合作为最小实现模板。
+- **ACE**: `Agents/ace/ace.py` (Multi-role collaboration, multi-stage generation, and reflection); suitable for Agents requiring complex memory management.
+- **CoT**: `Agents/cot/agent.py` + `generator.py` (Single Prompt Baseline); suitable as a minimal implementation template.
 
-在这两者之间，你可以实现任意复杂度的方案，只要遵循本文档约定，便能快速集成到现有 CLI、结果存储与日志体系中。
-
+Between these two, you can implement solutions of any complexity as long as they adhere to the conventions in this document for rapid integration into existing CLI, storage, and logging systems.
