@@ -12,14 +12,19 @@
 
 set -e
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-cd "$PROJECT_ROOT"
-
+BENCHMARK_MODULE="SeriousGame.run_edt"   # 对应 python -m SeriousGame.run_beergame
+BENCHMARK_NAME="SeriousGame"
+TASK_NAME="EDT"
+AGENT_METHOD="dc"
+MODE="eval_only"
 SAVE_DIR="results"
 
-python -m SeriousGame.run_edt \
-  --mode eval_only \
-  --agent_method mem0 \
+LOG_NAME="${BENCHMARK_NAME}_run_${TASK_NAME}_${AGENT_METHOD}_${MODE}.log"
+echo "Starting ${TASK_NAME} ${MODE} ${AGENT_METHOD} run. Logs: ${LOG_NAME}"
+
+python -m "${BENCHMARK_MODULE}" \
+  --mode "${MODE}" \
+  --agent_method "${AGENT_METHOD}" \
   --api_provider openai \
   --generator_model deepseek-v3 \
   --max_tokens 4096 \
@@ -28,4 +33,6 @@ python -m SeriousGame.run_edt \
   --bptk_host 127.0.0.1 \
   --edt_mcp_server_path SeriousGame/edt_mcp_server_local.py \
   --bptk_repo_root ./SeriousGame \
-  "$@"
+  "$@" \
+#  > "${LOG_NAME}" 2>&1 &
+

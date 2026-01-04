@@ -323,7 +323,6 @@ def call_interviewer_llm(
         max_tokens=max_tokens,
         use_json_mode=False,
         temperature=temperature,
-        max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},

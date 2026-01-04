@@ -604,6 +604,7 @@ class EDTEnv:
             raise RuntimeError("step called before init (instance_uuid missing)")
 
         # Debug: log the outgoing settings before hitting /run-step
+        '''
         _dbg(
             "edt.step.call",
             env_id=self.env_id,
@@ -611,7 +612,7 @@ class EDTEnv:
             step=self.step_count,
             settings=settings,
         )
-
+        '''
         payload: Optional[Dict[str, Any]] = None
         if settings is not None:
             payload = {"settings": settings}
@@ -650,12 +651,13 @@ class EDTEnv:
 
         # Debug: log a subset of metrics after the step so we can check whether
         # settings had any visible effect on key properties.
+        flat_metrics = {k.split('.')[-2]: v for k, v in list(flat.items())[:200]}
         debug_keys = []
         for k in flat.keys():
             if any(x in k for x in
-                   ("fixed_cost", "revenue_risk_level", "revenue_risk", "cash", "accumulated_earnings")):
+                   ("fixed_cost", "revenue_risk_level", "revenue_risk", "cash", "accumulated_earnings", "accumulated_expenses")):
                 debug_keys.append(k)
-        debug_snapshot = {k: flat[k] for k in debug_keys}
+        debug_snapshot = {k: flat_metrics[k] for k in debug_keys}
 
         _dbg(
             "edt.step.result",
@@ -671,7 +673,7 @@ class EDTEnv:
             "step": self.step_count,
             "instance_uuid": self.instance_uuid,
             # cap to keep payload size stable for MCP
-            "flat_metrics": {k: v for k, v in list(flat.items())[:200]},
+            "flat_metrics": flat_metrics,
         }
 
         info = {"reward_level": level, "http_status": resp.status_code}

@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         "--agent_method",
         type=str,
         default="amem",
-        choices=["amem", "cot", "ace", "mem0"],
+        choices=["amem", "cot", "ace", "mem0", "debate", "discussion", "gepa", "reflexion", "self-refine", "dc"],
         help="Agent method",
     )
     p.add_argument(
@@ -112,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         "--reflector_model",
         type=str,
         default=None,
-        help="ACE only: reflector model name; defaults to generator_model if not set.",
+        help="Reflector model name (used by ACE/GEPA). Defaults to generator_model if not set.",
     )
     p.add_argument(
         "--curator_model",
@@ -137,6 +137,18 @@ def parse_args() -> argparse.Namespace:
         default=0.90,
         help="ACE only: confidence threshold for bulletpoint analyzer.",
     )
+
+    # Debate (optional)
+    p.add_argument("--debate_rounds", type=int, default=1)
+    p.add_argument("--debate_pro_temperature", type=float, default=0.0)
+    p.add_argument("--debate_con_temperature", type=float, default=0.2)
+    p.add_argument("--debate_judge_temperature", type=float, default=0.0)
+
+    # Discussion (optional)
+    p.add_argument("--discussion_num_experts", type=int, default=3)
+    p.add_argument("--discussion_rounds", type=int, default=1)
+    p.add_argument("--discussion_expert_temperature", type=float, default=0.2)
+    p.add_argument("--discussion_moderator_temperature", type=float, default=0.0)
 
     return p.parse_args()
 
@@ -197,6 +209,7 @@ def main() -> None:
     config = {
         "task_name": "SeriousGame/EDT",
         "save_dir": args.save_dir,
+        "agent_method": args.agent_method,
         "json_mode": False,
         "test_workers": 1,
         "edt": {
@@ -211,7 +224,7 @@ def main() -> None:
             },
             "toolmap": toolmap,
             "mcp_episode_config_key": "config",
-            "max_steps": 25,
+            "max_steps": 96,
             "keep_temp_bptk_repo": bool(args.keep_temp_bptk_repo),
             "bptk": {
                 "template_repo_root": args.bptk_repo_root,
@@ -278,6 +291,77 @@ def main() -> None:
         from Agents.mem0.agent import Mem0Agent
 
         agent = Mem0Agent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "debate":
+        from Agents.debate import DebateAgent
+
+        agent = DebateAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+            rounds=args.debate_rounds,
+            pro_temperature=args.debate_pro_temperature,
+            con_temperature=args.debate_con_temperature,
+            judge_temperature=args.debate_judge_temperature,
+        )
+    elif args.agent_method == "discussion":
+        from Agents.discussion import DiscussionAgent
+
+        agent = DiscussionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+            num_experts=args.discussion_num_experts,
+            rounds=args.discussion_rounds,
+            expert_temperature=args.discussion_expert_temperature,
+            moderator_temperature=args.discussion_moderator_temperature,
+        )
+    elif args.agent_method == "gepa":
+        from Agents.gepa import GEPAAgent
+
+        reflector_model = args.reflector_model or args.generator_model
+        agent = GEPAAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=reflector_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "reflexion":
+        from Agents.reflexion import ReflexionAgent
+        config["edt"]["online"] = {
+            "utilization_threshold": 0.70,
+            "reflect_on_success": False,
+        }
+        agent = ReflexionAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "self-refine":
+        from Agents.self_refine import SelfRefineAgent
+        agent = SelfRefineAgent(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            max_tokens=args.max_tokens,
+            agent_method=args.agent_method,
+        )
+    elif args.agent_method == "dc":
+        from Agents.dynamic_cheatsheet import DynamicCheatsheetAgent
+        if "edt" not in config or not isinstance(config["edt"], dict):
+            config["edt"] = {}
+        config["edt"].update({
+                "cheatsheet_window_size": 1,
+                "initial_cheatsheet_path": None,
+        })
+        agent = DynamicCheatsheetAgent(
             api_provider=args.api_provider,
             generator_model=args.generator_model,
             max_tokens=args.max_tokens,

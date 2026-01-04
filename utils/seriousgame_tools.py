@@ -333,6 +333,36 @@ def evaluate_beergame_set(
 # EDT evaluation (scenario-level)
 # ============================
 
+# ============================
+# EDT: learning-oriented metric helpers
+# ============================
+
+# 仅用于“模型学习/记忆”的指标 keys
+EDT_LEARNING_METRIC_KEYS = [
+    "accumulated_earnings",
+    "accumulated_revenue",
+    "accumulated_expenses",
+    "overall_profit_margin",
+    "overall_avg_utilization",
+]
+
+
+def edt_extract_learning_metrics(flat_metrics: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Extract a compact set of metrics for learning from a raw flat_metrics dict.
+    Only keeps the five keys in EDT_LEARNING_METRIC_KEYS and coerces them to float
+    when possible.
+    """
+    out: Dict[str, float] = {}
+    for k in EDT_LEARNING_METRIC_KEYS:
+        if k in flat_metrics:
+            try:
+                out[k] = float(flat_metrics[k])
+            except Exception:
+                # 如果不能转成 float 就略过
+                continue
+    return out
+
 def _pick_free_port(host: str = "127.0.0.1") -> int:
     """Bind to port 0 to obtain a free port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -476,6 +506,11 @@ async def _run_one_edt_episode_scenario_level(
     episode_cfg["scenarios"] = [new_scenario_key]
     episode_cfg["max_steps"] = max_steps
 
+    # 学习快照相关配置：默认为 12 步一个快照
+    snapshot_interval = int(edt_cfg.get("learning_snapshot_interval", 12))
+    if snapshot_interval <= 0:
+        snapshot_interval = 12
+
     # ---- start bptk server
     port = _pick_free_port(bptk_host)
     base_url = f"http://{bptk_host}:{port}"
@@ -528,6 +563,7 @@ async def _run_one_edt_episode_scenario_level(
             step_idx = 0
             total_reward = 0.0
             trajectory: List[Dict[str, Any]] = []
+            learning_snapshots: List[Dict[str, Any]] = []
 
             while not done and step_idx < max_steps:
                 step_out = await _mcp_call(server, "step-edt-env", {"env_id": env_id, "settings": {}})
@@ -538,6 +574,20 @@ async def _run_one_edt_episode_scenario_level(
 
                 if edt_cfg.get("save_trajectory", False):
                     trajectory.append({"step": step_idx, "obs": obs, "reward": reward})
+
+                # 每隔 snapshot_interval 步，或在最后一步时，记录一次“学习用 metrics 快照”
+                # step_idx 从 0 开始表示第 1 步，因此 step_number = step_idx + 1
+                step_number = step_idx + 1
+                if snapshot_interval > 0 and (
+                    step_number % snapshot_interval == 0 or step_number == max_steps or done
+                ):
+                    flat_metrics_step = (obs.get("flat_metrics") or {})
+                    snapshot_metrics = edt_extract_learning_metrics(flat_metrics_step)
+                    learning_snapshots.append({
+                        "step": step_number,
+                        "metrics": snapshot_metrics,
+                    })
+
                 step_idx += 1
 
             last_obs = obs
@@ -549,6 +599,9 @@ async def _run_one_edt_episode_scenario_level(
                 except Exception:
                     continue
             metrics.setdefault("total_reward", float(total_reward))
+
+            # 学习用最终 metrics（只包含五个 key）
+            learning_metrics = edt_extract_learning_metrics(flat)
 
             # best-effort close
             try:
@@ -569,7 +622,9 @@ async def _run_one_edt_episode_scenario_level(
                 "config": episode_cfg,
                 "steps": step_idx,
                 "total_reward": float(total_reward),
-                "metrics": metrics,
+                "metrics": metrics,                 # 原始全量 metrics（兼容原有代码）
+                "learning_metrics": learning_metrics,      # ✅ 仅五个指标
+                "learning_snapshots": learning_snapshots,  # ✅ 每 snapshot_interval 步的快照
             }
             if trajectory:
                 outcome["trajectory"] = trajectory
@@ -600,27 +655,62 @@ def evaluate_edt_set(
     log_dir: Optional[str] = None,
     log_prefix: str = "edt",
     verbose: bool = True,
+    mode: str = "eval",
 ) -> Tuple[Dict[str, float], Dict[str, Any]]:
     """Scenario-level EDT evaluation.
 
     Returns:
       - global_stats: per-metric mean over episodes
       - detail_log: {"episodes": [...], "errors": [...]}
+
+    If the agent exposes a `_record_edt_experience` method and `mode == "online"`,
+    this function will call that hook after each successful episode with:
+        agent._record_edt_experience(sample, schema, metrics, repeat_idx)
+    where:
+      - `sample` is the original test_samples[i] dict,
+      - `schema` is the agent's *raw* EDT schema output for this episode
+        (falling back to the normalized schema if raw is not present),
+      - `metrics` is the compact `learning_metrics` dict if available,
+        otherwise the full `metrics` dict,
+      - `repeat_idx` is the episode index (0-based) within this run.
     """
 
-    async def _run_all() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    async def _run_all():
         outcomes: List[Dict[str, Any]] = []
         errors: List[Dict[str, Any]] = []
-        for sample in test_samples:
+
+        for idx, sample in enumerate(test_samples):
             try:
-                out = await _run_one_edt_episode_scenario_level(
+                ep = await _run_one_edt_episode_scenario_level(
                     agent=agent,
                     sample=sample,
                     edt_cfg=edt_cfg,
                     log_dir=log_dir,
                     verbose=verbose,
                 )
-                outcomes.append(out)
+                outcomes.append(ep)
+
+                # ✅ online 模式下，为带记忆的 Agent 提供统一的经验写入钩子
+                if mode == "online" and hasattr(agent, "_record_edt_experience"):
+                    try:
+                        # 优先用 Agent 的原始 schema；若无则退回规范化 schema
+                        raw_schema = ep.get("schema_raw", ep.get("schema"))
+                        # 优先用压缩版学习 metrics；若无则退回全量 metrics
+                        learn_metrics = ep.get("learning_metrics", ep.get("metrics", {}))
+                        agent._record_edt_experience(
+                            sample,
+                            raw_schema,
+                            learn_metrics,
+                            idx,
+                        )
+                    except Exception as hook_err:
+                        if verbose:
+                            sid = str(sample.get("scenario_id", "interactive"))
+                            print(
+                                f"[EDT][WARN] _record_edt_experience failed for "
+                                f"scenario_id={sid}, repeat_idx={idx}: {hook_err}"
+                            )
+
             except Exception as e:
                 sid = str(sample.get("scenario_id", "interactive"))
                 err = {"scenario_id": sid, "error": repr(e)}
@@ -642,6 +732,28 @@ def evaluate_edt_set(
     for k, lst in metric_lists.items():
         if lst:
             global_stats[k] = float(sum(lst) / len(lst))
+
+    # 新增：为每一局构建一个简明的指标条目，类似 BeerGame 的 episode_metrics
+    episode_metrics: List[Dict[str, Any]] = []
+    for ep in outcomes:
+        rec: Dict[str, Any] = {
+            "scenario_id": ep.get("scenario_id"),
+        }
+        # 原始全量 metrics（如 accumulated_earnings 等）
+        m = ep.get("metrics", {}) or {}
+        for mk, mv in m.items():
+            if isinstance(mv, (int, float)):
+                rec[mk] = float(mv)
+
+        # 如果存在压缩后的学习指标（learning_metrics），也一并附上
+        lm = ep.get("learning_metrics")
+        if isinstance(lm, dict) and lm:
+            rec["learning_metrics"] = lm
+
+        episode_metrics.append(rec)
+
+    # 把逐局指标挂到 global_stats 下面，方便在 edt_metrics.json 中查看
+    global_stats["episode_metrics"] = episode_metrics
 
     detail_log: Dict[str, Any] = {"episodes": outcomes, "errors": errors}
 
@@ -908,25 +1020,24 @@ def edt_prepare_run(
     save_dir = str(config.get("save_dir", "results"))
     task_name = str(config.get("task_name", "SeriousGame/EDT"))
 
-    run_subdir = f"{task_name}/{mode}/{time.strftime('%Y%m%d_%H%M%S')}"
+    # 把当前 mode 写入 config，供后续 evaluate_edt_set 判断是否是 online
+    config["mode"] = mode
+
+    agent_method = str(config.get("agent_method", "") or "").strip()
+    agent_part = agent_method if agent_method else "unknown_agent"
+    run_subdir = f"{task_name}/{mode}/{agent_part}/{time.strftime('%Y%m%d_%H%M%S')}"
     resolved_save_path = os.path.join(save_dir, run_subdir)
     os.makedirs(resolved_save_path, exist_ok=True)
 
     log_dir = os.path.join(resolved_save_path, "detailed_logs")
     os.makedirs(log_dir, exist_ok=True)
 
-    print(f"\n{'='*60}")
-    print("EDT EVALUATION")
-    print(f"{'='*60}")
-    print(f"Episodes: {len(test_samples)}")
-    print(f"Log dir: {log_dir}")
-    print(f"{'='*60}\n")
-
-    return {
+    ctx = {
         "run_subdir": run_subdir,
         "resolved_save_path": resolved_save_path,
         "log_dir": log_dir,
     }
+    return ctx
 
 
 def edt_evaluate_run(
@@ -938,6 +1049,7 @@ def edt_evaluate_run(
 ) -> Tuple[Dict[str, Any], Any]:
     """Run EDT evaluation (scenario-level). Model-agnostic except for agent decision hooks."""
     edt_cfg = dict(config.get("edt", {}) or {})
+    mode = str(config.get("mode", "eval"))
 
     global_stats, detail_log = evaluate_edt_set(
         agent=agent,
@@ -945,7 +1057,8 @@ def edt_evaluate_run(
         edt_cfg=edt_cfg,
         log_dir=ctx.get("log_dir"),
         log_prefix="edt",
-        verbose=True,
+        verbose=bool(config.get("verbose", True)),
+        mode=mode,
     )
 
     # Keep output structure consistent with other tasks in this repo.
@@ -1102,53 +1215,121 @@ def build_edt_decision_context(
 
 def render_edt_prompt(ctx: Dict[str, Any]) -> Tuple[str, str]:
     """Create model-agnostic EDT system/user prompts from ctx."""
-    system = "你是一个企业运营经理，目标是在仿真中最大化利润。只输出 JSON，不要解释，不要 markdown。"
+    # System prompt: role + output format
+    system = (
+        "You are a portfolio manager at a consulting firm. "
+        "You make one setup decision before the simulation starts. "
+        "Output only valid JSON with keys exactly C, R, P."
+    )
 
-    cost_lines = []
-    if ctx.get("fixed_cost") is not None:
-        cost_lines.append(f"- fixed_cost/step: {ctx['fixed_cost']}")
-    if ctx.get("consultant_salary") is not None:
-        cost_lines.append(f"- consultant salary/step: {ctx['consultant_salary']}")
-    if ctx.get("consultant_workplace_cost") is not None:
-        cost_lines.append(f"- consultant workplace_cost/step: {ctx['consultant_workplace_cost']}")
-    cost_block = "\n".join(cost_lines) if cost_lines else "- 成本包含固定成本与顾问成本（数值可能不在此处给出），它们会持续侵蚀利润。\n"
+    # Basic timeline parameters
+    start_step = 0
+    horizon_steps = int(ctx.get("horizon_steps", 0) or 0)
+    stop_step = horizon_steps
+    dt = ctx.get("dt", 1.0)
+    # Use horizon_steps as an approximate count of steps
+    H = max(1, horizon_steps)
 
-    proj_blocks = []
-    for p in ctx["projects"]:
+    # Cost parameters
+    fixed_cost = ctx.get("fixed_cost", None)
+    consultant_salary = ctx.get("consultant_salary", None)
+    workplace_cost = ctx.get("consultant_workplace_cost", None)
+    C_max = int(ctx.get("C_max", 0) or 0)
+
+    cost_sentence = (
+        f"The template costs are: fixed_cost={fixed_cost}, salary={consultant_salary}, "
+        f"workplace_cost={workplace_cost}, and the maximum available consultants in the template "
+        f"is C_max={C_max}."
+    )
+
+    # Project list block
+    proj_blocks: List[str] = []
+    projects = ctx.get("projects", []) or []
+    for i, p in enumerate(projects):
         proj_blocks.append(
-            f"{p['index']}: {p['name']}\n"
+            f"[{i}] name={p['name']}\n"
             f"  - required_consultants: {p['required_consultants']}\n"
             f"  - contracted_effort: {p['contracted_effort']}\n"
-            f"  - billing_rate(不可控): {p['billing_rate']}\n"
-            f"  - contracted_p: {p['contracted_probability']}\n"
-            f"  - extension_p: {p['extension_probability']}\n"
-            f"  - follow_on_p: {p['follow_on_probability']}\n"
+            f"  - billing_rate: {p['billing_rate']}\n"
+            f"  - contracted_probability: {p['contracted_probability']}\n"
+            f"  - extension_probability: {p['extension_probability']}\n"
+            f"  - follow_on_probability: {p['follow_on_probability']}\n"
             f"  - default_start_step: {p['default_start_step']}\n"
             f"  - default_deadline_step: {p['default_deadline_step']}"
         )
 
-    user = (
-        "EDT（Enterprise Digital Twin）场景级决策（一次性）。你只在仿真开始前决策一次，中途不再干预。\n\n"
-        "目标：最大化终局 accumulated_earnings（累计净利润≈累计收入-累计支出）。\n"
-        "直觉：执行项目会带来收入；维持顾问与公司运营会产生持续成本；R 会影响延期/后续等风险事件触发，从而改变收入/成本轨迹。\n\n"
-        f"时间轴：starttime={ctx['starttime']}, stoptime={ctx['stoptime']}, dt={ctx['dt']}, horizon_steps={ctx['horizon_steps']}。\n"
-        f"资源上限：C_max={ctx['C_max']}；模板 R_default={ctx['R_default']}。\n\n"
-        f"成本信息：\n{cost_block}\n\n"
-        "项目列表（保持索引顺序，不要重排）：\n"
-        + "\n\n".join(proj_blocks)
-        + "\n\n"
-        "你只能输出最小 schema：\n"
-        "- C: 顾问人数（0..C_max）\n"
-        "- R: revenue_risk_level（0..1）\n"
-        "- P: 长度=N_projects；P[i]=0 表示禁用；或 [1,start_step,deadline_step] 启用并设置排期（步索引）。\n\n"
-        "硬约束：\n"
-        "- 至少启用 1 个项目（不要输出全 0）。\n"
-        "- 只要启用任何项目，则 C 必须 >=1。\n"
-        "- 0 <= start_step <= deadline_step <= horizon_steps。\n"
-        "- 不允许修改 salary、fixed_cost、billing_rate 等结构性参数。\n\n"
-        "只返回 JSON：\n"
-        '{ "C": <int>, "R": <float>, "P": [ ... ] }'
+    project_list_block = "\n\n".join(proj_blocks)
+    n_projects = len(projects)
+
+    # User prompt: full task description with context
+    user_parts: List[str] = []
+
+    user_parts.append(
+        "You are managing a consulting firm for a single simulation run. "
+        "You act once at the beginning by choosing how many consultants to keep, "
+        "which projects to execute, each project's active window, and a global risk level. "
+        "After that, the simulator runs by itself until it ends. "
+        f"The run is discrete-step: it advances from start_step={start_step} "
+        f"to stop_step={stop_step} (about {H} steps) with dt={dt}. "
+        "Think of dt as the per-step scaling: one consultant can deliver about dt effort each step; "
+        "delivered effort generates revenue; costs also accrue each step. "
+        "Your primary goal is to maximize end-of-run cumulative profit "
+        "(earnings = revenue − expenses), while avoiding obviously fragile choices such as "
+        "extreme negative cash or excessive risk."
     )
+
+    user_parts.append(
+        "Revenue is earned only when project work is delivered within the run: "
+        "each step, delivered effort converts to money at that project's billing_rate "
+        "(roughly revenue_step ≈ delivered_effort_step × billing_rate). "
+        "Expenses are paid each step even if idle: each retained consultant costs salary and "
+        "workplace overhead, and the firm also pays a fixed operating cost per step. "
+        + cost_sentence
+    )
+    user_parts.append(
+        "Each project has fields that define its economics and constraints. "
+        "contracted_effort is the base total work to deliver; you only monetize the portion "
+        "that is actually completed before the simulation ends. Delivery is capacity-limited: "
+        " at any step, at most 'required_consultants' consultants can work on a project, and each consultant "
+        "can work on only one project per step. Once a consultant starts a project, they remain on that project "
+        "until it is completed (they do not switch projects mid-stream). In each step, each working consultant "
+        "contributes roughly 1 unit of project effort (scaled by dt in the simulator), "
+        "so a project’s maximum per-step progress is approximately consultants × dt effort. "
+        "billing_rate is the dollars per one unit of delivered effort. "
+        "start_time and deadline describe timing: work can only accrue within the window you choose, "
+        "and after deadline the project stops progressing (unfinished work cannot generate further revenue). "
+        "contracted_probability represents how reliably contracted revenue materializes (lower means more uncertainty). "
+        "If the base contracted work finishes before the deadline, an expansion may occur with probability "
+        "extension_probability, adding extension_effort more work (potential upside but consumes capacity and time). "
+        "At the project's deadline, a follow-on opportunity may be created with probability follow_on_probability "
+        "(another potential upside with risk); is_follow_on indicates whether a project is itself a follow-on "
+        "(template projects are usually false). "
+        "Projects below are index-aligned; do not reorder them:"
+        "\n\n"
+        f"{project_list_block}"
+    )
+    user_parts.append(
+        "You must output a single JSON object and nothing else. "
+        f"C is an integer in [0, C_max={C_max}]. "
+        "R is the global revenue_risk_level in [0, 1] "
+        "(higher tends to allow more risky upside such as extensions/follow-ons and more uncertainty; "
+        "lower is more conservative). "
+        f"P is a list of length N_projects={n_projects}; each entry is either 0 to disable the project, "
+        "or [1, start_step, deadline_step] to enable it with your chosen window, where "
+        f"{start_step} <= start_step <= deadline_step <= {stop_step}. "
+        "You do not assign consultants to projects; you only choose C, R, and each project's window."
+    )
+
+    user_parts.append(
+        "Return only JSON in exactly this format:\n"
+        "{\n"
+        "\"C\": <int>,\n"
+        "\"R\": <float>,\n"
+        "\"P\": [...]\n"
+        "}"
+    )
+
+    user = "\n\n".join(user_parts)
     return system, user
 
 

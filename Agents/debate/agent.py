@@ -24,6 +24,12 @@ from utils.seriousgame_tools import (
     beergame_base_rule_order,
     beergame_render_prompt,
     beergame_extract_order_and_note,
+    edt_prepare_run,
+    edt_evaluate_run,
+    edt_save_run,
+    build_edt_decision_context,
+    render_edt_prompt,
+    normalize_edt_schema,
 )
 from .generator import DebateGenerator, DebateConfig
 
@@ -59,9 +65,9 @@ class DebateAgent:
         self.generator_client = self.generator.client
         self.temperature = 0.7
 
-    # ==========================================================
-    # Consulting support: on_case_start / reply / on_case_end
-    # ==========================================================
+        # Consulting episode state
+        self._current_case_id: Optional[str] = None
+        self._dialogue_history: List[Dict[str, str]] = []
 
     def _call_llm_json(self, system: str, user: str) -> Dict[str, Any]:
         import json as _json
@@ -86,6 +92,42 @@ class DebateAgent:
                 text = text[: j + 1]
         try:
             return _json.loads(text)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """Best-effort extraction of the first JSON object from free-form text."""
+        if not isinstance(text, str):
+            return "{}"
+        t = text.strip()
+        if not t:
+            return "{}"
+        if t.startswith("{") and t.endswith("}"):
+            return t
+
+        # locate first '{' and then find a matching closing brace
+        start = t.find("{")
+        if start < 0:
+            return "{}"
+        depth = 0
+        for i in range(start, len(t)):
+            ch = t[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return t[start : i + 1]
+        # fallback: try trimming to last brace
+        end = t.rfind("}")
+        if end >= 0 and end > start:
+            return t[start : end + 1]
+        return "{}"
+
+    def _safe_load_json(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(self._extract_first_json_object(text))
         except Exception:
             return {}
 
@@ -430,11 +472,81 @@ class DebateAgent:
 
         return results
 
-    # ==========================================================
-    # Unified run with consulting routing
-    # ==========================================================
+    # ==================================================================
+    # EDT decision hook (required by utils.seriousgame_tools.evaluate_edt_set)
+    # ==================================================================
+    async def _decide_edt_scenario_schema(
+        self,
+        base_summary: Dict[str, Any],
+        scenario_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Decide an EDT scenario schema using Debate's PRO/CON/JUDGE mechanism.
 
-    def run(
+        This is the only agent-specific step in the EDT pipeline:
+        seriousgame_tools will handle scenario generation, simulation, and scoring.
+        """
+        scenario_meta = scenario_meta or {}
+
+        # 1) Build a robust, tool-layer context (incl. horizon inference, defaults).
+        ctx = build_edt_decision_context(
+            base_summary=base_summary,
+            scenario_meta=scenario_meta,
+            max_steps_hint=scenario_meta.get("max_steps"),
+        )
+
+        # 2) Render the standard EDT prompt (model-agnostic).
+        system, user = render_edt_prompt(ctx)
+
+        # 3) Enforce Debate output contract:
+        #    the judge must return JSON with keys {reasoning, final_answer},
+        #    and final_answer must be a JSON object schema: {"C":..., "R":..., "P":[...]}.
+        user = (
+            user
+            + "\n\nIMPORTANT OUTPUT CONSTRAINTS:\n"
+            "- Respond STRICTLY in JSON as required by the debate judge.\n"
+            "- Set `final_answer` to a JSON OBJECT (not a string).\n"
+            "- `final_answer` must contain ONLY keys: C, R, P.\n"
+            "- Do not include extra commentary outside the JSON.\n"
+        )
+
+        final_text, _transcript, _trace = self.generator.generate(
+            question=user,
+            context=system,
+            use_json_mode=False,
+            call_id="edt",
+        )
+
+        envelope = self._safe_load_json(final_text)
+        candidate = envelope.get("final_answer", envelope)
+
+        if isinstance(candidate, str):
+            candidate = self._safe_load_json(candidate)
+
+        if not isinstance(candidate, dict):
+            candidate = {}
+
+        # 4) Normalize/clip to enforce non-degenerate constraints.
+        return normalize_edt_schema(candidate, ctx)
+
+    # ==================================================================
+    # EDT run entry (align with other agents: Prepare / Evaluate / Save)
+    # ==================================================================
+    def run_edt(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ctx = edt_prepare_run(mode=mode, test_samples=test_samples, config=config, allowed_modes=self.SUPPORTED_MODES)
+        results, error_log = edt_evaluate_run(agent=self, test_samples=test_samples, config=config, ctx=ctx)
+        edt_save_run(results=results, error_log=error_log, config=config, ctx=ctx)
+        return results
+
+    # -----------------------
+    # BizBench / StructuredReasoning task runner (previously: run)
+    # -----------------------
+    def run_bizbench(
         self,
         mode: str,
         test_samples: Optional[List[Dict[str, Any]]],
@@ -511,5 +623,31 @@ class DebateAgent:
         print(f"{'='*60}\n")
 
         return results
+
+    def run(
+        self,
+        mode: str,
+        test_samples: Optional[List[Dict[str, Any]]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ):
+        """Unified entry point. Routes to the correct task runner without modifying existing task logic."""
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"{self.agent_method.upper()} agent only supports modes {self.SUPPORTED_MODES}, got '{mode}'"
+            )
+        if not test_samples:
+            raise ValueError(f"{self.agent_method.upper()} agent requires test samples but none were provided.")
+
+        task_name = str(config.get("task_name", getattr(data_processor, "task_name", ""))).lower()
+
+        # Keep existing tasks untouched; only add EDT routing.
+        if "edt" in task_name:
+            return self.run_edt(mode, test_samples, data_processor, config)
+        if "consult" in task_name:
+            return self.run_consulting(mode, test_samples, data_processor, config)
+
+        # Default: StructuredReasoning / BizBench
+        return self.run_bizbench(mode, test_samples, data_processor, config)
 
 

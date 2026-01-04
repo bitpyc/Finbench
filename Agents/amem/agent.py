@@ -266,6 +266,100 @@ class AMemAgent:
         reply = consulting_extract_candidate_reply(data)
         return reply
 
+    def _record_edt_experience(
+        self,
+        scenario: Dict[str, Any],
+        schema: Dict[str, Any],
+        metrics: Dict[str, Any],
+        repeat_idx: int,
+    ) -> None:
+        """
+        EDT 场景重复运行后的记忆写入接口（online 模式用）。
+
+        预期由 utils.seriousgame_tools.evaluate_edt_set 在每次重复实验结束后调用：
+            agent._record_edt_experience(scenario, schema, metrics, repeat_idx)
+
+        参数
+        ----
+        scenario : dict
+            原始测试样本（base scenario 的描述、配置等）。
+        schema : dict
+            本次 run 中 agent 输出的「原始 schema」（LLM 输出的最精简 JSON）。
+        metrics : dict
+            本次 run 的学习用指标（通常是那 5 个：accumulated_earnings、
+            accumulated_revenue、accumulated_expenses、overall_profit_margin、
+            overall_avg_utilization；如没有则可能是全量 metrics）。
+        repeat_idx : int
+            同一 base scenario 下的第几次重复试验（0-based）。
+        """
+        if self.memory is None:
+            return
+
+        # 如果全局关闭 writeback，则直接跳过
+        if not getattr(self, "writeback", True):
+            return
+
+        # 1) 场景 id 方便检索
+        try:
+            scenario_id = (
+                scenario.get("scenario_id")
+                or scenario.get("id")
+                or scenario.get("name")
+                or "unknown"
+            )
+        except Exception:
+            scenario_id = "unknown"
+
+        # 2) 序列化 scenario / schema / metrics，适当截断，控制长度
+        try:
+            scenario_repr = json.dumps(scenario, ensure_ascii=False)
+        except Exception:
+            scenario_repr = str(scenario)
+        if len(scenario_repr) > self.writeback_max_chars_context:
+            scenario_repr = (
+                scenario_repr[: self.writeback_max_chars_context] + "...(truncated)"
+            )
+
+        try:
+            schema_repr = json.dumps(schema, ensure_ascii=False)
+        except Exception:
+            schema_repr = str(schema)
+        if len(schema_repr) > 800:
+            schema_repr = schema_repr[:800] + "...(truncated)"
+
+        try:
+            metrics_repr = json.dumps(metrics, ensure_ascii=False)
+        except Exception:
+            metrics_repr = str(metrics)
+
+        # 3) 拼成一条记忆文本，打上简洁 tag，便于后续通过 query 检索
+        note_lines = [
+            f"[EDT][scenario_id={scenario_id}][repeat={int(repeat_idx)}]",
+            "",
+            "Scenario (truncated JSON):",
+            scenario_repr,
+            "",
+            "Chosen schema (agent output):",
+            schema_repr,
+            "",
+            "Outcome metrics (learning signals):",
+            metrics_repr,
+        ]
+        note = "\n".join(note_lines).strip()
+
+        meta = {
+            "task": "edt",
+            "scenario_id": str(scenario_id),
+            "repeat_idx": int(repeat_idx),
+        }
+
+        # 4) 实际写入 AMemMemory；加锁保证线程安全
+        try:
+            with self._mem_lock:
+                self.memory.add(note, meta=meta)
+        except Exception:
+            # 记忆写入失败不应该中断 EDT 仿真主流程
+            return
 
     # ==================================================================
     # EDT 决策
@@ -276,6 +370,15 @@ class AMemAgent:
         base_summary: Dict[str, Any],
         scenario_meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """
+        EDT 场景 schema 决策（AMem 版本，带记忆检索）。
+
+        流程：
+        1) 用 base_summary + scenario_meta 构造 EDT 决策上下文 ctx；
+        2) 基于 scenario_id 优先检索该场景的历史 EDT 经验，再补充全局 EDT 经验；
+        3) 将检索结果直接拼接在 EDT user prompt 的末尾，由本方法负责拼接；
+        4) 调模型输出 raw schema，并用 normalize_edt_schema 做归一化与防退化。
+        """
         # 1) 构造通用 ctx（含 horizon 兜底推断、default_P 等）
         ctx = build_edt_decision_context(
             base_summary=base_summary,
@@ -283,13 +386,58 @@ class AMemAgent:
             max_steps_hint=(scenario_meta or {}).get("max_steps"),
         )
 
-        # 2) prompt 也是通用逻辑（模型无关）
-        system, user = render_edt_prompt(ctx)
+        # 2) 设计检索 query：优先同一 scenario_id，再补充所有 EDT 经验
+        retrieved_blocks: List[str] = []
+        if self.memory is not None:
+            try:
+                # 尝试拿一个可读的 scenario_id
+                scenario_id = (
+                    (scenario_meta or {}).get("scenario_id")
+                    or ctx.get("scenario_id")
+                    or "unknown"
+                )
+                scenario_id = str(scenario_id)
 
-        # 3) 仅这一句是模型相关：调用 LLM 返回 JSON
-        raw = self._call_llm_json(system, user)
+                # (a) 主查询：同一 scenario_id 的 EDT 经验
+                primary_query = f"[EDT][scenario_id={scenario_id}]"
+                primary_text = self.memory.retrieve(primary_query, k=self.retrieve_k)
+                if primary_text and primary_text.strip():
+                    retrieved_blocks.append(primary_text.strip())
 
-        # 4) 归一化/防退化也是通用逻辑（模型无关）
+                # (b) 补充查询：全局 EDT 经验（主查询太少时再补）
+                combined_len = sum(len(b) for b in retrieved_blocks)
+                if combined_len < 1000:
+                    fallback_query = "[EDT]"
+                    k_fb = max(1, self.retrieve_k // 2)
+                    fallback_text = self.memory.retrieve(fallback_query, k=k_fb)
+                    if fallback_text and fallback_text.strip():
+                        retrieved_blocks.append(fallback_text.strip())
+            except Exception:
+                # 记忆检索失败不影响主流程
+                retrieved_blocks = []
+
+        retrieved_text = "\n\n".join(retrieved_blocks).strip()
+        if retrieved_text and len(retrieved_text) > 4000:
+            retrieved_text = retrieved_text[:4000] + "\n...(truncated)"
+
+        # 3) 先用工具层构造 EDT 基础 prompt，再在 agent 层拼接“历史经验块”
+        system, base_user = render_edt_prompt(ctx)
+
+        if retrieved_text:
+            user = (
+                base_user
+                + "\n\n=== PAST POLICIES AND OUTCOMES FROM PREVIOUS RUNS ===\n"
+                  "The following notes summarize your previous EDT simulation runs "
+                  "stored in memory. Use them as qualitative hints when choosing C, "
+                  "R and project windows, but still reason explicitly about this run "
+                  "and do not copy any past decision verbatim.\n\n"
+                + retrieved_text
+            )
+        else:
+            user = base_user
+
+        # 4) 调用 LLM，解析 JSON，并做归一化
+        raw = self._call_llm_json(system=system, user=user)
         return normalize_edt_schema(raw, ctx)
 
     # ==================================================================

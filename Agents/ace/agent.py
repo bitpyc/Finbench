@@ -125,6 +125,10 @@ class ACE:
         self.best_playbook = self.playbook
         # Track global bullet ID
         self.next_global_id = 1
+        # EDT-specific online learning bookkeeping
+        self._edt_episode_counter: int = 0         # 当前已经见过多少个 EDT episode
+        self._edt_total_episodes: int = 0          # 总的 episode 数（在 run_edt 里设置）
+        self._edt_config_params: Dict[str, Any] = {}  # 复用 _extract_config_params 的结果，用于 curator
 
     # ==========================================================
     # Consulting support (lightweight, no playbook updates)
@@ -721,9 +725,138 @@ class ACE:
             pass
         return results
 
+    def _record_edt_experience(
+        self,
+        scenario: Dict[str, Any],
+        schema: Dict[str, Any],
+        metrics: Dict[str, Any],
+        repeat_idx: int,
+    ) -> None:
+        """
+        由 EDT 评测侧在每个 episode 结束后调用。
+
+        用 Reflector + Curator 把 “场景 + 决策 + 结果指标” 总结成可复用的经验，
+        并写入 playbook。
+        """
+        # 基础信息
+        scenario_id = scenario.get("scenario_id", "unknown")
+        config = scenario.get("config", {})
+        base_summary = config.get("base_summary") or {}
+
+        # 文本化：给 Reflector 看的 “推理轨迹 + 环境反馈”
+        from pprint import pformat
+
+        decision_text = json.dumps(schema, ensure_ascii=False)
+        metrics_text = json.dumps(metrics, ensure_ascii=False)
+
+        reasoning_trace = (
+            f"EDT scenario run #{repeat_idx} for scenario_id={scenario_id}.\n\n"
+            f"Base summary (template-level):\n{pformat(base_summary, indent=2)}\n\n"
+            f"Chosen schema (C, R, P):\n{decision_text}\n\n"
+            f"Outcome metrics:\n{metrics_text}\n"
+        )
+
+        env_feedback = (
+            "Simulation outcome summary:\n"
+            f"- accumulated_earnings = {metrics.get('accumulated_earnings')}\n"
+            f"- accumulated_revenue = {metrics.get('accumulated_revenue')}\n"
+            f"- accumulated_expenses = {metrics.get('accumulated_expenses')}\n"
+            f"- overall_profit_margin = {metrics.get('overall_profit_margin')}\n"
+            f"- overall_avg_utilization = {metrics.get('overall_avg_utilization')}\n"
+        )
+
+        question_for_reflection = (
+            "From this single EDT simulation run, extract concise, reusable "
+            "lessons for how to choose C (consultants), R (risk level), and "
+            "project windows P to maximize profit while keeping utilization "
+            "healthy and avoiding obviously fragile strategies."
+        )
+
+        # 1) Reflector：把一局的结果总结成若干条经验 bullet（文本）
+        reflection_content, bullet_tags, _ = self.reflector.reflect(
+            question=question_for_reflection,
+            reasoning_trace=reasoning_trace,
+            predicted_answer=json.dumps(schema, ensure_ascii=False),
+            ground_truth=None,                     # EDT 没有 ground truth，只看收益表现
+            environment_feedback=env_feedback,
+            bullets_used=None,
+            use_ground_truth=False,
+            use_json_mode=False,
+            call_id=f"edt_reflect_{scenario_id}_rep{repeat_idx}",
+            log_dir=None,
+        )
+
+        # 2) Curator：把刚刚这段 reflection 内容以小步更新方式纳入 playbook
+        #    这里复用 _extract_config_params 提供的 curator_frequency / token_budget 等。
+        config_params = self._edt_config_params or self._extract_config_params({})
+        curator_frequency = config_params.get("curator_frequency", 1)
+        token_budget = config_params.get("token_budget", 4096)
+
+        # 更新计数
+        self._edt_episode_counter += 1
+        step = self._edt_episode_counter
+        total_samples = self._edt_total_episodes or max(step, 1)
+
+        # 只有在到达 curator_frequency 的步数时才真正跑一次 curator，避免太频繁
+        if step % curator_frequency != 0:
+            return
+
+        stats = get_playbook_stats(self.playbook)
+
+        self.playbook, self.next_global_id, _, _ = self.curator.curate(
+            current_playbook=self.playbook,
+            recent_reflection=reflection_content,
+            question_context=reasoning_trace,
+            current_step=step,
+            total_samples=total_samples,
+            token_budget=token_budget,
+            playbook_stats=stats,
+            use_ground_truth=False,
+            use_json_mode=False,
+            call_id=f"edt_curate_{scenario_id}_rep{repeat_idx}",
+            log_dir=None,
+            next_global_id=self.next_global_id,
+        )
+
+        # 如果你在 ACE 中启用了 BulletpointAnalyzer，也可以在这里再跑一轮去重：
+        if self.use_bulletpoint_analyzer and self.bulletpoint_analyzer:
+            self.playbook = self.bulletpoint_analyzer.analyze(
+                playbook=self.playbook,
+                threshold=self.bulletpoint_analyzer_threshold,
+                merge=True,
+            )
+
     # ==========================================================
     # EDT support (SeriousGame) - scenario schema + run wrapper
     # ==========================================================
+    def _get_edt_experience_snippet(self, max_chars: int = 2500) -> str:
+        """
+        从当前 playbook 中抽取与 EDT 相关的经验片段，控制长度。
+        这里先用一个简单启发式：优先保留最近的内容，必要时做行级筛选。
+        """
+        text = getattr(self, "playbook", "") or ""
+        if not text:
+            return ""
+
+        # 简单策略 1：按行筛一下含 EDT 或 consultants / risk 的行
+        lines = text.splitlines()
+        edt_lines = [
+            ln for ln in lines
+            if ("EDT" in ln)
+               or ("consultant" in ln.lower())
+               or ("risk" in ln.lower())
+               or ("profit" in ln.lower())
+               or ("utilization" in ln.lower())
+        ]
+        snippet = "\n".join(edt_lines).strip()
+
+        # 如果筛出来太少，就退化为取 playbook 的尾部
+        if not snippet:
+            snippet = text[-max_chars:].strip()
+        elif len(snippet) > max_chars:
+            snippet = snippet[-max_chars:].strip()
+
+        return snippet
 
     def _decide_edt_scenario_schema(
         self,
@@ -745,15 +878,24 @@ class ACE:
         # 让 seriousgame_tools 生成 system / user prompt
         system, user = render_edt_prompt(ctx)
 
-        # 在原始 prompt 基础上增加 ACE 风格 CoT 约束（但不要求模型显式输出推理）
+        # 2) 从 playbook 中抽取 EDT 相关经验片段
+        edt_experience = self._get_edt_experience_snippet(max_chars=2500)
+        # print(f"used experience: {edt_experience}")
+        if edt_experience:
+            user = (
+                    user
+                    + "\n\n=== The experience from previous runs ===\n"
+                    + edt_experience
+                    + "\n"
+            )
+
+        # 3) 最后再加一句明确的输出约束，避免 LLM 输出解释
         user = (
-            user
-            + "\n\nYou are an ACE (Analyze–Critique–Enhance) operations strategist.\n"
-              "1) Internally analyze the current simulation template and objectives.\n"
-              "2) Internally propose a scenario configuration schema and critique it.\n"
-              "3) Internally refine the schema.\n"
-              "IMPORTANT: Do NOT reveal your step-by-step analysis or critique.\n"
-              "Return ONLY a JSON object that matches the expected EDT scenario schema."
+                user
+                + "\n\nIMPORTANT OUTPUT CONSTRAINTS:\n"
+                + "- Output ONLY a single JSON object.\n"
+                + "- The JSON object must contain ONLY keys: C, R, P.\n"
+                + "- Do not wrap JSON in markdown fences.\n"
         )
 
         raw = self._call_llm_json(system=system, user=user)
@@ -776,8 +918,15 @@ class ACE:
             raise ValueError(
                 f"EDT only supports modes {self.SUPPORTED_MODES}, got '{mode}'"
             )
-        if not test_samples:
-            raise ValueError("EDT requires non-empty test_samples")
+
+        # 记录下与 curator 相关的参数，供 _record_edt_experience 使用
+        self._edt_config_params = self._extract_config_params(config)
+        self._edt_episode_counter = 0
+
+        # 可以根据 edt 配置推一个 “总 episode 数”，主要是给 curator 提供 total_samples
+        edt_cfg = dict(config.get("edt", {}) or {})
+        repeats = int(edt_cfg.get("repeats", 1))
+        self._edt_total_episodes = max(repeats * max(len(test_samples), 1), 1)
 
         ctx = edt_prepare_run(
             mode=mode,

@@ -105,6 +105,8 @@ def summarize_base_scenario(scenario: Dict[str, Any], max_steps: int = 96) -> Di
         node = container.get(key, None)
         if isinstance(node, dict) and "value" in node:
             return node["value"]
+        elif node is not None:
+            return node
         return default
 
     # 1) prefer runspecs
@@ -295,6 +297,7 @@ def apply_schema_to_scenario(
     # projects: enable/disable and adjust schedule
     P = list(schema.get("P", []) or [])
     starttime = float(base_summary.get("starttime", 0.0) or 0.0)
+    stoptime = float(base_summary.get("stoptime", 0.0) or 0.0)
     dt = float(base_summary.get("dt", 0.25) or 0.25)
 
     new_projects: List[Dict[str, Any]] = []
@@ -309,8 +312,8 @@ def apply_schema_to_scenario(
             d_step = s_step
 
         # convert to time (aligned)
-        st = starttime + float(s_step) * dt
-        dl = starttime + float(d_step) * dt
+        st = max(min(stoptime, s_step), starttime)
+        dl = max(min(stoptime, d_step), starttime)
 
         pprops = proj_obj.get("properties", {}) or {}
         if "start_time" in pprops and isinstance(pprops["start_time"], dict):

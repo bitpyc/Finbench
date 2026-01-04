@@ -25,6 +25,12 @@ from utils.seriousgame_tools import (
     beergame_base_rule_order,
     beergame_render_prompt,
     beergame_extract_order_and_note,
+    build_edt_decision_context,
+    render_edt_prompt,
+    normalize_edt_schema,
+    edt_prepare_run,
+    edt_evaluate_run,
+    edt_save_run,
 )
 from .generator import ReflexionGenerator
 
@@ -65,6 +71,11 @@ class ReflexionAgent:
         self.memory_path: Optional[str] = None
         self.memory: List[Dict[str, Any]] = []
 
+        # EDT runtime state
+        self._edt_last_ctx: Optional[Dict[str, Any]] = None
+        self._edt_online_cfg: Dict[str, Any] = {}
+        self._edt_mode: str = "eval_only"
+
     # ---------- memory utilities ----------
     @staticmethod
     def _hash_sample(question: str, context: str) -> str:
@@ -72,6 +83,15 @@ class ReflexionAgent:
         digest.update((question or "").encode("utf-8"))
         digest.update(b"\n")
         digest.update((context or "").encode("utf-8"))
+        return digest.hexdigest()
+
+    @staticmethod
+    def _hash_edt(base_summary: Dict[str, Any], scenario_meta: Dict[str, Any]) -> str:
+        """Stable-ish key to group memory within the same EDT base scenario."""
+        digest = hashlib.sha256()
+        digest.update(json.dumps(base_summary, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        digest.update(b"\n")
+        digest.update(json.dumps(scenario_meta or {}, sort_keys=True, ensure_ascii=False).encode("utf-8"))
         return digest.hexdigest()
 
     def _load_memory(self, path: str) -> None:
@@ -92,14 +112,322 @@ class ReflexionAgent:
         with open(self.memory_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
-    def _retrieve_reflections(self) -> List[str]:
+    def _retrieve_reflections(self, *, domain: str, key: Optional[str] = None) -> List[str]:
         """
         按原始实现思路：不做相似度/哈希匹配，直接取最近的若干失败反思。
         保留 hash 字段仅用于记录，检索时不依赖它。
         """
-        matched = [m for m in self.memory if not m.get("success")]
-        matched = matched[-self.memory_top_k :]
-        return [m.get("reflection", "") for m in matched if m.get("reflection")]
+        if domain == "bizbench":
+            matched = [m for m in self.memory if not m.get("success")]
+            matched = matched[-self.memory_top_k :]
+            return [m.get("reflection", "") for m in matched if m.get("reflection")]
+
+        if domain == "edt":
+            if key:
+                scoped = [
+                    m
+                    for m in self.memory
+                    if m.get("domain") == "edt"
+                    and (m.get("edt_key") == key)
+                    and (not m.get("success"))
+                    and m.get("reflection")
+                ]
+                scoped = scoped[-self.memory_top_k :]
+                if scoped:
+                    return [m["reflection"] for m in scoped if m.get("reflection")]
+
+            # fallback: any EDT failures
+            matched = [m for m in self.memory if m.get("domain") == "edt" and not m.get("success") and m.get("reflection")]
+            matched = matched[-self.memory_top_k :]
+            return [m.get("reflection", "") for m in matched if m.get("reflection")]
+
+        return []
+
+    # ---------- JSON helpers (for EDT schema output) ----------
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        if not isinstance(text, str):
+            return "{}"
+        t = text.strip()
+        if not t:
+            return "{}"
+        if t.startswith("{") and t.endswith("}"):
+            return t
+
+        start = t.find("{")
+        if start < 0:
+            return "{}"
+        depth = 0
+        for i in range(start, len(t)):
+            ch = t[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return t[start : i + 1]
+        end = t.rfind("}")
+        if end >= 0 and end > start:
+            return t[start : end + 1]
+        return "{}"
+
+    def _safe_load_json(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(self._extract_first_json_object(text))
+        except Exception:
+            return {}
+
+    # ==========================================================
+    # EDT: decision hook (called by seriousgame_tools)
+    # ==========================================================
+    async def _decide_edt_scenario_schema(
+        self,
+        base_summary: Dict[str, Any],
+        scenario_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        scenario_meta = scenario_meta or {}
+
+        ctx = build_edt_decision_context(
+            base_summary=base_summary,
+            scenario_meta=scenario_meta,
+            max_steps_hint=scenario_meta.get("max_steps"),
+        )
+        system, user = render_edt_prompt(ctx)
+
+        edt_key = self._hash_edt(base_summary, scenario_meta)
+        prior_refs: List[str] = []
+        if self._edt_mode == "online":
+            prior_refs = self._retrieve_reflections(domain="edt", key=edt_key)
+
+        if prior_refs:
+            # Keep it compact; EDT prompt should not be bloated
+            mem_block = "\n".join([f"- {r.strip()}" for r in prior_refs if r and r.strip()])[:4000]
+            system = (
+                system
+                + "\n\nRECENT LESSONS (from previous EDT runs; follow them if applicable):\n"
+                + mem_block
+            )
+
+        user = (
+            user
+            + "\n\nIMPORTANT OUTPUT CONSTRAINTS:\n"
+            + "- Output ONLY a single JSON object.\n"
+            + "- The JSON object must contain ONLY keys: C, R, P.\n"
+            + "- Do not wrap JSON in markdown fences.\n"
+        )
+
+        resp = self.generator_client.chat.completions.create(
+            model=self.generator.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.0,
+            max_tokens=min(self.max_tokens, 512),
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        raw = self._safe_load_json(text)
+
+        candidate = raw.get("final_answer", raw)
+        if isinstance(candidate, str):
+            candidate = self._safe_load_json(candidate)
+        if not isinstance(candidate, dict):
+            candidate = {}
+
+        return normalize_edt_schema(candidate, ctx)
+
+    # ==========================================================
+    # EDT: online memory hook (called by seriousgame_tools after an episode)
+    # ==========================================================
+    def _extract_utilization(self, learn_metrics: Dict[str, Any]) -> Optional[float]:
+        """
+        Try best-effort extraction of utilization in [0,1].
+        You can adapt key names here without touching seriousgame_tools.
+        """
+        if not isinstance(learn_metrics, dict):
+            return None
+        for k in ("utilization", "avg_utilization", "mean_utilization", "resource_utilization"):
+            v = learn_metrics.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+        return None
+
+    def _build_edt_reflection_prompt(
+        self,
+        *,
+        base_summary: Dict[str, Any],
+        scenario_meta: Dict[str, Any],
+        schema: Dict[str, Any],
+        learn_metrics: Dict[str, Any],
+        utilization: Optional[float],
+        threshold: float,
+    ) -> Tuple[str, str]:
+        """
+        Generate a concise, actionable reflection to improve utilization for the next episode.
+        Output is a single paragraph (no bullets) to keep memory compact.
+        """
+        system = (
+            "You are a senior operations manager reflecting on a simulated enterprise digital twin run.\n"
+            "Your job: write ONE short actionable lesson that can be applied in the NEXT run.\n"
+            "Focus only on decisions a manager can control in the schema (C/R/P), and prioritize improving utilization.\n"
+            "Do NOT mention prompts, LLMs, or evaluation. Do NOT include JSON. Do NOT use bullet points.\n"
+        )
+        user = (
+            "Episode summary:\n"
+            f"- Utilization: {utilization if utilization is not None else 'unknown'} (target >= {threshold})\n"
+            f"- Metrics (raw): {json.dumps(learn_metrics, ensure_ascii=False)[:2000]}\n\n"
+            "The schema you used (C/R/P JSON):\n"
+            f"{json.dumps(schema, ensure_ascii=False)[:2000]}\n\n"
+            "Company/base scenario context (abbrev):\n"
+            f"{json.dumps(base_summary, ensure_ascii=False)[:1500]}\n\n"
+            "Write ONE short lesson (1-3 sentences) describing what to change in the next schema to increase utilization."
+        )
+        return system, user
+
+    def _record_edt_experience(
+        self,
+        base_summary: Dict[str, Any],
+        scenario_meta: Dict[str, Any],
+        schema: Dict[str, Any],
+        learn_metrics: Dict[str, Any],
+        run_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> None:
+        """
+        Called by seriousgame_tools after each episode when mode == online.
+        Stores a reflection memory based on utilization signal.
+        """
+        if self._edt_mode != "online":
+            return
+
+        online_cfg = self._edt_online_cfg or {}
+        threshold = float(online_cfg.get("utilization_threshold", 0.70))
+        reflect_on_success = bool(online_cfg.get("reflect_on_success", False))
+
+        utilization = self._extract_utilization(learn_metrics)
+        success = (utilization is not None) and (utilization >= threshold)
+
+        if success and not reflect_on_success:
+            # record success marker (optional)
+            entry = {
+                "domain": "edt",
+                "timestamp": datetime.now().isoformat(),
+                "success": True,
+                "utilization": utilization,
+                "edt_key": self._hash_edt(base_summary, scenario_meta),
+                "run_id": run_id,
+                "episode_id": episode_id,
+            }
+            self._append_memory(entry)
+            return
+
+        # Generate reflection text
+        sys_p, user_p = self._build_edt_reflection_prompt(
+            base_summary=base_summary,
+            scenario_meta=scenario_meta,
+            schema=schema,
+            learn_metrics=learn_metrics,
+            utilization=utilization,
+            threshold=threshold,
+        )
+        resp = self.generator_client.chat.completions.create(
+            model=self.generator.model,
+            messages=[
+                {"role": "system", "content": sys_p},
+                {"role": "user", "content": user_p},
+            ],
+            temperature=0.2,
+            max_tokens=min(self.max_tokens, 256),
+        )
+        reflection = (resp.choices[0].message.content or "").strip()
+        # keep it compact
+        reflection = " ".join(reflection.split())
+        if len(reflection) > 600:
+            reflection = reflection[:600].rstrip()
+
+        entry = {
+            "domain": "edt",
+            "timestamp": datetime.now().isoformat(),
+            "success": success,
+            "utilization": utilization,
+            "learn_metrics": learn_metrics,
+            "schema": schema,
+            "reflection": reflection,
+            "edt_key": self._hash_edt(base_summary, scenario_meta),
+            "run_id": run_id,
+            "episode_id": episode_id,
+        }
+        self._append_memory(entry)
+
+    # ==========================================================
+    # EDT evaluation entry (uses seriousgame_tools pipeline)
+    # ==========================================================
+    def _init_edt_memory(self, ctx: Dict[str, Any], mode: str, config: Dict[str, Any]) -> None:
+        """
+        Initialize EDT memory file under the run directory.
+        We keep EDT memory separate from BizBench memory to avoid contamination.
+        """
+        self._edt_last_ctx = ctx
+        self._edt_mode = mode
+
+        # online cfg: optional
+        edt_cfg = config.get("edt") if isinstance(config, dict) else None
+        online_cfg = {}
+        if isinstance(edt_cfg, dict):
+            online_cfg = edt_cfg.get("online") if isinstance(edt_cfg.get("online"), dict) else {}
+        self._edt_online_cfg = online_cfg or {}
+
+        # Determine run directory (ctx should contain one of these keys)
+        resolved_save_path = (
+            ctx.get("resolved_save_path")
+            or ctx.get("save_path")
+            or ctx.get("run_dir")
+            or ctx.get("log_dir")
+        )
+        if not resolved_save_path:
+            # fallback: keep in config save_dir root
+            resolved_save_path = os.path.join(config.get("save_dir", "results"), "SeriousGame_EDT", "reflexion_tmp")
+            os.makedirs(resolved_save_path, exist_ok=True)
+
+        mem_path = os.path.join(resolved_save_path, "edt_reflections.jsonl")
+        self._load_memory(mem_path)
+
+        # store in run_config for debugging
+        try:
+            run_cfg_path = os.path.join(resolved_save_path, "run_config.json")
+            if os.path.exists(run_cfg_path):
+                with open(run_cfg_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            else:
+                payload = {}
+            payload["reflexion_edt_memory_path"] = mem_path
+            payload["reflexion_edt_online_cfg"] = self._edt_online_cfg
+            with open(run_cfg_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def run_edt(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        _ = data_processor
+        ctx = edt_prepare_run(
+            mode=mode,
+            test_samples=test_samples,
+            config=config,
+            allowed_modes=self.SUPPORTED_MODES,
+        )
+
+        # Initialize per-run EDT memory (for online mode this is essential)
+        self._init_edt_memory(ctx=ctx, mode=mode, config=config)
+
+        results, error_log = edt_evaluate_run(agent=self, test_samples=test_samples, config=config, ctx=ctx)
+        edt_save_run(results=results, error_log=error_log, config=config, ctx=ctx)
+        return results
 
     # ==========================================================
     # Consulting support: on_case_start / reply / on_case_end
@@ -174,7 +502,7 @@ class ReflexionAgent:
         ]
         transcript_text = "\n".join(transcript_lines) or "[no previous dialogue]"
 
-        prior_refs = self._retrieve_reflections()
+        prior_refs = self._retrieve_reflections(domain="bizbench")
 
         # 走 reflexion 链：question=最新提问，context=全量对话，附带最近反思
         response_text, _, meta = self.generator.generate(
@@ -268,7 +596,7 @@ class ReflexionAgent:
             "No other keys. No text before or after JSON. Do NOT reveal chain-of-thought."
         )
 
-        prior_reflections = self._retrieve_reflections() if hasattr(self, "_retrieve_reflections") else None
+        prior_reflections = self._retrieve_reflections(domain="bizbench") if hasattr(self, "_retrieve_reflections") else None
 
         response_text, _, _meta = self.generator.generate(
             question=question_text,
@@ -518,8 +846,7 @@ class ReflexionAgent:
     # ==========================================================
     # Unified run with consulting routing
     # ==========================================================
-
-    def run(
+    def run_bizbench(
         self,
         mode: str,
         test_samples: Optional[List[Dict[str, Any]]],
@@ -619,7 +946,7 @@ class ReflexionAgent:
         context = sample.get("context", "")
         target = sample.get("target", "")
         if memory_snapshot is self.memory:
-            prior_refs = self._retrieve_reflections()
+            prior_refs = self._retrieve_reflections(domain="bizbench")
         else:
             prior_refs = [
                 m.get("reflection", "")
@@ -781,4 +1108,22 @@ class ReflexionAgent:
         error_log = {"errors": errors, "accuracy": accuracy}
         return results, error_log
 
-
+    # ==========================================================
+    # Unified entry point (router)
+    # ==========================================================
+    def run(
+        self,
+        mode: str,
+        test_samples: Optional[List[Dict[str, Any]]],
+        data_processor,
+        config: Dict[str, Any],
+    ):
+        task_name = str(config.get("task_name", getattr(data_processor, "task_name", ""))).lower()
+        if "edt" in task_name:
+            return self.run_edt(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config,
+            )
+        return self.run_bizbench(mode=mode, test_samples=test_samples, data_processor=data_processor, config=config)

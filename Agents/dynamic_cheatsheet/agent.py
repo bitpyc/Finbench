@@ -22,6 +22,14 @@ from utils.seriousgame_tools import (
 from .core.language_model import DynamicCheatsheetLanguageModel
 from .core.state import CheatsheetState
 
+from utils.seriousgame_tools import (
+    build_edt_decision_context,
+    render_edt_prompt,
+    normalize_edt_schema,
+    edt_prepare_run,
+    edt_evaluate_run,
+    edt_save_run,
+)
 
 DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -86,6 +94,16 @@ class DynamicCheatsheetAgent:
         self.beergame_cheatsheet_path: Optional[str] = None
         self.beergame_cheatsheet_text: str = ""
 
+        # ===== EDT runtime state (Mode A) =====
+        self._edt_state: Optional[CheatsheetState] = None
+        self._edt_paths: Optional[Dict[str, str]] = None
+        self._edt_window_size: int = 1
+        self._edt_pending: List[Dict[str, Any]] = []
+        self._edt_history_path: Optional[str] = None
+
+    # ==========================================================
+    # Shared helpers
+    # ==========================================================
     def _prepare_dirs(self, task_name: str, mode: str, save_dir: str) -> Dict[str, str]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_subdir = os.path.join(task_name, self.agent_method, mode, timestamp)
@@ -753,8 +771,316 @@ class DynamicCheatsheetAgent:
     # ==========================================================
     # Main run with consulting routing
     # ==========================================================
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        if not isinstance(text, str):
+            return "{}"
+        t = text.strip()
+        if not t:
+            return "{}"
+        if t.startswith("{") and t.endswith("}"):
+            return t
+        start = t.find("{")
+        if start < 0:
+            return "{}"
+        depth = 0
+        for i in range(start, len(t)):
+            ch = t[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return t[start : i + 1]
+        end = t.rfind("}")
+        if end >= 0 and end > start:
+            return t[start : end + 1]
+        return "{}"
 
-    def run(
+    def _safe_load_json(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(self._extract_first_json_object(text))
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _extract_utilization(learn_metrics: Dict[str, Any]) -> Optional[float]:
+        if not isinstance(learn_metrics, dict):
+            return None
+        for k in ("utilization", "avg_utilization", "mean_utilization", "resource_utilization"):
+            v = learn_metrics.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+        return None
+
+    def _render_edt_cheatsheet_block(self, cheatsheet_text: str, max_chars: int = 1200) -> str:
+        txt = (cheatsheet_text or "").strip()
+        if not txt or txt == "(empty)":
+            return ""
+        txt = " ".join(txt.split())
+        if len(txt) > max_chars:
+            txt = txt[:max_chars].rstrip()
+        return (
+            "\n\nEDT CHEATSHEET (use as guidance; keep decisions controllable and consistent):\n"
+            + txt
+            + "\n"
+        )
+
+    async def _decide_edt_scenario_schema(
+        self,
+        base_summary: Dict[str, Any],
+        scenario_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Called by seriousgame_tools.
+        Mode-A: inject current cheatsheet into prompt; generate schema once; normalize.
+        """
+        scenario_meta = scenario_meta or {}
+        ctx = build_edt_decision_context(
+            base_summary=base_summary,
+            scenario_meta=scenario_meta,
+            max_steps_hint=scenario_meta.get("max_steps"),
+        )
+        system, user = render_edt_prompt(ctx)
+
+        if self._edt_state is not None:
+            system = system + self._render_edt_cheatsheet_block(self._edt_state.cheatsheet_text)
+
+        user = (
+            user
+            + "\n\nIMPORTANT OUTPUT CONSTRAINTS:\n"
+            + "- Output ONLY a single JSON object.\n"
+            + "- The JSON object must contain ONLY keys: C, R, P.\n"
+            + "- Do not wrap JSON in markdown fences.\n"
+        )
+
+        resp = self.generator_client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=self.temperature,
+            max_tokens=min(self.max_tokens, 512),
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        raw = self._safe_load_json(text)
+
+        candidate = raw.get("final_answer", raw)
+        if isinstance(candidate, str):
+            candidate = self._safe_load_json(candidate)
+        if not isinstance(candidate, dict):
+            candidate = {}
+
+        schema = normalize_edt_schema(candidate, ctx)
+        return schema
+
+    def _update_edt_cheatsheet_from_window(self, window_records: List[Dict[str, Any]]) -> None:
+        """
+        Window-level cheatsheet update (Mode A):
+        - Uses (schema, metrics) for the window to propose a compact, actionable cheatsheet update.
+        - Updates self._edt_state.cheatsheet_text in-place.
+        """
+        if not self._edt_state:
+            return
+        if not window_records:
+            return
+
+        current = (self._edt_state.cheatsheet_text or "").strip()
+        if not current:
+            current = "(empty)"
+
+        # compact window summary for prompting
+        compact = []
+        for r in window_records[-20:]:
+            compact.append(
+                {
+                    "utilization": r.get("utilization"),
+                    "learn_metrics": r.get("learn_metrics", {}),
+                    "schema": r.get("schema", {}),
+                }
+            )
+
+        system = (
+            "You are maintaining a concise operational cheatsheet for designing EDT scenarios.\n"
+            "Goal: improve utilization and overall efficiency.\n"
+            "Update the cheatsheet based on recent (schema, metrics) outcomes.\n"
+            "Rules:\n"
+            "- Keep the cheatsheet SHORT (max 12 bullet points total).\n"
+            "- Prefer actionable heuristics and anti-patterns.\n"
+            "- Avoid repeating existing bullets.\n"
+            "- Do not mention LLMs, prompts, or evaluation.\n"
+            "Output ONLY plain text cheatsheet (bullet points allowed)."
+        )
+
+        user = (
+            "CURRENT CHEATSHEET:\n"
+            f"{current[:3000]}\n\n"
+            "RECENT WINDOW OUTCOMES (schema + metrics):\n"
+            f"{json.dumps(compact, ensure_ascii=False)[:5000]}\n\n"
+            "Now output the UPDATED cheatsheet text."
+        )
+
+        resp = self.generator_client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=self.temperature,
+            max_tokens=min(self.max_tokens, 512),
+        )
+        new_txt = (resp.choices[0].message.content or "").strip()
+        if not new_txt:
+            return
+
+        # update state & history
+        self._edt_state.update_cheatsheet(new_txt)
+        if self._edt_history_path:
+            self._append_history(
+                self._edt_history_path,
+                {
+                    "event": "window_cheatsheet_update",
+                    "timestamp": datetime.now().isoformat(),
+                    "window_size": len(window_records),
+                    "updated_cheatsheet": new_txt,
+                },
+            )
+
+    def _record_edt_experience(
+        self,
+        base_summary: Dict[str, Any],
+        scenario_meta: Dict[str, Any],
+        schema: Dict[str, Any],
+        learn_metrics: Dict[str, Any],
+        run_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> None:
+        """
+        Hook called by seriousgame_tools after each episode (if present).
+        Mode-A: cache the experience; update cheatsheet after each window boundary.
+        """
+        util = self._extract_utilization(learn_metrics)
+        rec = {
+            "timestamp": datetime.now().isoformat(),
+            "run_id": run_id,
+            "episode_id": episode_id,
+            "utilization": util,
+            "learn_metrics": learn_metrics,
+            "schema": schema,
+        }
+        self._edt_pending.append(rec)
+
+        # Write per-episode trace (optional, for debugging)
+        if self._edt_history_path:
+            self._append_history(self._edt_history_path, {"event": "episode", **rec})
+
+        # window boundary update
+        if self._edt_window_size > 0 and len(self._edt_pending) >= self._edt_window_size:
+            window = self._edt_pending[: self._edt_window_size]
+            self._edt_pending = self._edt_pending[self._edt_window_size :]
+            self._update_edt_cheatsheet_from_window(window)
+
+    def run_edt(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        EDT runner using seriousgame_tools, with Mode-A cheatsheet updates:
+        - episode runs once
+        - cheatsheet updates at window boundaries within the run
+        """
+        _ = data_processor
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"{self.agent_method.upper()} agent only supports modes {self.SUPPORTED_MODES}, got '{mode}'"
+            )
+        if not test_samples:
+            raise ValueError(f"{self.agent_method.upper()} agent requires test samples but none were provided.")
+
+        # Use seriousgame_tools to prepare run directories etc.
+        ctx = edt_prepare_run(
+            mode=mode,
+            test_samples=test_samples,
+            config=config,
+            allowed_modes=self.SUPPORTED_MODES,
+        )
+
+        # Determine save path (ctx should include one of these)
+        resolved_save_path = (
+            ctx.get("resolved_save_path")
+            or ctx.get("save_path")
+            or ctx.get("run_dir")
+            or ctx.get("log_dir")
+            or os.path.join(config.get("save_dir", "results"), "SeriousGame_EDT", self.agent_method)
+        )
+        os.makedirs(resolved_save_path, exist_ok=True)
+        log_dir = os.path.join(resolved_save_path, "detailed_llm_logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Cheatsheet history for EDT (separate from bizbench history)
+        self._edt_history_path = os.path.join(resolved_save_path, "edt_cheatsheet_history.jsonl")
+
+        # Initialize cheatsheet state (allow user-specified initial cheatsheet file)
+        init_path = None
+        edt_cfg = config.get("edt") if isinstance(config, dict) else None
+        if isinstance(edt_cfg, dict):
+            init_path = edt_cfg.get("initial_cheatsheet_path") or config.get("initial_cheatsheet_path")
+        else:
+            init_path = config.get("initial_cheatsheet_path")
+
+        self._edt_state = CheatsheetState(cheatsheet_text=self._load_initial_cheatsheet(init_path))
+
+        # Window size (Mode A): default 6; can override via config
+        window_size = 1
+        if isinstance(edt_cfg, dict):
+            window_size = int(edt_cfg.get("cheatsheet_window_size", window_size) or window_size)
+        self._edt_window_size = max(1, window_size)
+
+        # reset pending cache
+        self._edt_pending = []
+
+        # Persist a small config note for reproducibility
+        try:
+            run_cfg_path = os.path.join(resolved_save_path, "run_config.json")
+            payload = {}
+            if os.path.exists(run_cfg_path):
+                with open(run_cfg_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            payload["dynamic_cheatsheet_edt"] = {
+                "mode_a_window_size": self._edt_window_size,
+                "initial_cheatsheet_path": init_path,
+            }
+            with open(run_cfg_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        # Run evaluation via seriousgame_tools
+        results, error_log = edt_evaluate_run(agent=self, test_samples=test_samples, config=config, ctx=ctx)
+
+        # Flush remaining pending records into a final cheatsheet update (optional)
+        if self._edt_pending:
+            self._update_edt_cheatsheet_from_window(self._edt_pending)
+            self._edt_pending = []
+
+        # Save final cheatsheet
+        final_cheatsheet_path = os.path.join(resolved_save_path, "final_edt_cheatsheet.txt")
+        with open(final_cheatsheet_path, "w", encoding="utf-8") as f:
+            f.write(self._edt_state.cheatsheet_text if self._edt_state else "(empty)")
+
+        # Save run artifacts through seriousgame_tools
+        edt_save_run(results=results, error_log=error_log, config=config, ctx=ctx)
+
+        return results
+
+    # ==========================================================
+    # BizBench run (original run() implementation) -> renamed
+    # ==========================================================
+    def run_bizbench(
         self,
         mode: str,
         test_samples: Optional[List[Dict[str, Any]]],
@@ -979,3 +1305,154 @@ class DynamicCheatsheetAgent:
 
         return test_results
 
+    # ==========================================================
+    # Prompt specialization (BizBench) - unchanged
+    # ==========================================================
+    def _format_input(self, sample: Dict[str, Any], index: int, question_override: Optional[str] = None) -> str:
+        raw_question = question_override if question_override is not None else sample.get("question", "")
+        raw_context = sample.get("context", "")
+        question = (raw_question or "").strip()
+        context = (raw_context or "").strip()
+        parts = [f"Question #{index + 1}:\n{question}"]
+        if context:
+            parts.append(f"\nContext:\n{context}")
+        return "\n".join(parts).strip()
+
+    def _select_prompts_for_task(self, task_name: str, base_generator_prompt: str, base_cheatsheet_prompt: str) -> Tuple[str, str]:
+        if task_name.lower() == "formulaeval":
+            generator_prompt = (
+                "You are a code completion assistant. The function/method signature is provided above.\n"
+                "Fill in ONLY the missing body lines with correct indentation.\n"
+                "Do NOT repeat the class definition or the signature.\n"
+                "Do NOT return JSON or analysis; only return one ```python``` code block containing the body lines.\n"
+                "If the signature is present, just give the indented body lines; if only the body is missing, fill it directly.\n"
+                "Ensure the code is executable and self-contained (no external files/paths/imports beyond stdlib if needed).\n\n"
+                "Question:\n[[QUESTION]]"
+            )
+            cheatsheet_prompt = base_cheatsheet_prompt
+            return generator_prompt, cheatsheet_prompt
+
+        return base_generator_prompt, base_cheatsheet_prompt
+
+    def _process_sample(
+        self,
+        sample: Dict[str, Any],
+        idx: int,
+        state: CheatsheetState,
+        data_processor,
+        paths: Dict[str, str],
+        strip_task_instruction_fn,
+        update_state: bool = True,
+        log_history: bool = True,
+        verbose: bool = False,
+        call_prefix: Optional[str] = None,
+        retrieval_corpus: Optional[List[str]] = None,
+        retrieval_embeddings: Optional[List[List[float]]] = None,
+    ) -> Dict[str, Any]:
+        input_txt = self._format_input(sample, idx)
+        stripped_question = strip_task_instruction_fn(sample.get("question", ""))
+        input_txt_for_cheatsheet = self._format_input(sample, idx, question_override=stripped_question)
+        target = sample.get("target")
+
+        original_input_corpus = state.input_history + [input_txt]
+        original_input_embeddings = None
+        if retrieval_corpus and retrieval_embeddings:
+            idx_in_retrieval = self.retrieval_index.get(input_txt)
+            if idx_in_retrieval is None or idx_in_retrieval >= len(retrieval_embeddings):
+                idx_in_retrieval = len(retrieval_embeddings) - 1
+            permutation = [i for i in range(len(retrieval_corpus)) if i != idx_in_retrieval] + [idx_in_retrieval]
+            prev_inputs = [retrieval_corpus[i] for i in permutation]
+            prev_embeddings = [retrieval_embeddings[i] for i in permutation]
+            original_input_corpus = prev_inputs
+            original_input_embeddings = prev_embeddings
+            generator_outputs_so_far = [self.retrieval_outputs.get(i, "") for i in permutation]
+        else:
+            generator_outputs_so_far = state.output_history
+
+        output_dict = self.language_model.advanced_generate(
+            approach_name=self.dc_config.approach_name,
+            input_txt=input_txt,
+            cheatsheet=state.cheatsheet_text,
+            generator_template=self.generator_prompt_for_run,
+            cheatsheet_template=self.cheatsheet_prompt_for_run,
+            cheatsheet_question=input_txt_for_cheatsheet,
+            temperature=self.dc_config.temperature,
+            max_tokens=self.max_tokens,
+            max_num_rounds=self.dc_config.max_num_rounds,
+            allow_code_execution=self.dc_config.allow_code_execution,
+            code_execution_flag="EXECUTE CODE!",
+            add_previous_answers_to_cheatsheet=self.dc_config.add_previous_answers,
+            original_input_corpus=original_input_corpus,
+            original_input_embeddings=original_input_embeddings,
+            generator_outputs_so_far=generator_outputs_so_far,
+            retrieve_top_k=self.dc_config.retrieve_top_k,
+            log_dir=paths["log_dir"],
+            call_prefix=call_prefix or f"sample_{idx}",
+        )
+
+        final_answer = output_dict.get("final_answer")
+        final_cheatsheet = output_dict.get("final_cheatsheet") or state.cheatsheet_text
+        is_correct = data_processor.answer_is_correct(final_answer, target)
+
+        if update_state:
+            state.update_cheatsheet(final_cheatsheet)
+            state.append_example(
+                input_txt=input_txt,
+                generator_output=output_dict.get("final_output", ""),
+                generator_answer=final_answer or "",
+            )
+            if retrieval_corpus and retrieval_embeddings:
+                idx_in_retrieval = self.retrieval_index.get(input_txt)
+                if idx_in_retrieval is not None:
+                    self.retrieval_outputs[idx_in_retrieval] = final_answer or ""
+
+        if log_history and update_state:
+            history_payload = {
+                "index": idx,
+                "input": input_txt,
+                "steps": output_dict.get("steps"),
+                "final_cheatsheet": final_cheatsheet,
+            }
+            self._append_history(paths["cheatsheet_history_path"], history_payload)
+
+        if verbose:
+            print(f"[Sample {idx + 1}] Correct: {is_correct} | Final Answer: {final_answer}")
+
+        return {
+            "index": idx,
+            "input": input_txt,
+            "target": target,
+            "final_answer": final_answer,
+            "final_output": output_dict.get("final_output"),
+            "cheatsheet": final_cheatsheet,
+            "is_correct": is_correct,
+        }
+
+    # ==========================================================
+    # Unified run router
+    # ==========================================================
+    def run(
+        self,
+        mode: str,
+        test_samples: Optional[List[Dict[str, Any]]],
+        data_processor,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        task_name = str(config.get("task_name", getattr(data_processor, "task_name", ""))).lower()
+
+        # EDT routing
+        if "edt" in task_name:
+            return self.run_edt(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config,
+            )
+
+        # Otherwise keep original behavior
+        return self.run_bizbench(
+            mode=mode,
+            test_samples=test_samples,
+            data_processor=data_processor,
+            config=config,
+        )

@@ -22,6 +22,12 @@ from utils.seriousgame_tools import (
     beergame_base_rule_order,
     beergame_render_prompt,
     beergame_extract_order_and_note,
+    build_edt_decision_context,
+    render_edt_prompt,
+    normalize_edt_schema,
+    edt_prepare_run,
+    edt_evaluate_run,
+    edt_save_run,
 )
 from .generator import SelfRefineGenerator
 
@@ -58,6 +64,214 @@ class SelfRefineAgent:
         )
         self.generator_client = self.generator.init_role.client
         self.temperature = 0.7
+
+    # ==========================================================
+    # EDT helpers
+    # ==========================================================
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """Best-effort extraction of the first JSON object from free-form text."""
+        if not isinstance(text, str):
+            return "{}"
+        t = text.strip()
+        if not t:
+            return "{}"
+        if t.startswith("{") and t.endswith("}"):
+            return t
+
+        start = t.find("{")
+        if start < 0:
+            return "{}"
+        depth = 0
+        for i in range(start, len(t)):
+            ch = t[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return t[start : i + 1]
+        end = t.rfind("}")
+        if end >= 0 and end > start:
+            return t[start : end + 1]
+        return "{}"
+
+    def _safe_load_json(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(self._extract_first_json_object(text))
+        except Exception:
+            return {}
+
+    def _build_edt_self_refine_feedback_prompt(
+            self,
+            *,
+            ctx: Dict[str, Any],
+            schema: Dict[str, Any],
+    ) -> Tuple[str, str]:
+        system = (
+            "You are a strict schema reviewer for an enterprise digital twin (EDT) scenario design.\n"
+            "You must audit whether the proposed schema is actionable, consistent, and respects constraints.\n"
+            "Focus on: (1) controllable decisions only, (2) internal consistency across C/R/P, (3) missing fields, "
+            "(4) unrealistic or invalid values, (5) budget/utilization tradeoffs implied by the context.\n"
+            "Do NOT propose a completely new schema. Provide feedback for improving the current schema.\n"
+            "Return ONLY JSON: {\"is_valid\": true/false, \"feedback\": \"...\"}.\n"
+            "feedback must be concise (<= 8 sentences) and directly actionable."
+        )
+
+        # keep context compact to avoid bloating
+        ctx_compact = {
+            "base_scenario": ctx.get("base_scenario"),
+            "company": ctx.get("company"),
+            "constraints": ctx.get("constraints"),
+            "decision_space": ctx.get("decision_space"),
+            "notes": ctx.get("notes"),
+        }
+
+        user = (
+            "EDT decision context (abridged):\n"
+            f"{json.dumps(ctx_compact, ensure_ascii=False)[:3000]}\n\n"
+            "Proposed schema (C/R/P):\n"
+            f"{json.dumps(schema, ensure_ascii=False)[:2000]}\n\n"
+            "Audit this schema and output JSON {is_valid, feedback}."
+        )
+        return system, user
+
+    def _build_edt_self_refine_iterate_prompt(
+            self,
+            *,
+            ctx: Dict[str, Any],
+            schema: Dict[str, Any],
+            feedback_json: Dict[str, Any],
+    ) -> Tuple[str, str]:
+        system = (
+            "You are improving an EDT scenario design schema.\n"
+            "Rewrite the schema to address the review feedback.\n"
+            "Hard constraints:\n"
+            "- Output ONLY one JSON object.\n"
+            "- The JSON must contain ONLY keys: C, R, P.\n"
+            "- Do NOT include markdown fences or extra text.\n"
+            "- Keep changes minimal but effective; do not invent uncontrollable fields.\n"
+        )
+
+        ctx_compact = {
+            "base_scenario": ctx.get("base_scenario"),
+            "company": ctx.get("company"),
+            "constraints": ctx.get("constraints"),
+            "decision_space": ctx.get("decision_space"),
+        }
+
+        feedback_text = feedback_json.get("feedback", "")
+        user = (
+            "EDT decision context (abridged):\n"
+            f"{json.dumps(ctx_compact, ensure_ascii=False)[:3000]}\n\n"
+            "Current schema (C/R/P):\n"
+            f"{json.dumps(schema, ensure_ascii=False)[:2000]}\n\n"
+            "Reviewer feedback:\n"
+            f"{feedback_text}\n\n"
+            "Now output the improved schema JSON with ONLY keys C, R, P."
+        )
+        return system, user
+
+    # ==========================================================
+    # EDT decision hook (required by utils.seriousgame_tools)
+    # ==========================================================
+    async def _decide_edt_scenario_schema(
+            self,
+            base_summary: Dict[str, Any],
+            scenario_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        scenario_meta = scenario_meta or {}
+
+        ctx = build_edt_decision_context(
+            base_summary=base_summary,
+            scenario_meta=scenario_meta,
+            max_steps_hint=scenario_meta.get("max_steps"),
+        )
+
+        # --------- Step 1: initial schema generation (single shot) ---------
+        system, user = render_edt_prompt(ctx)
+        user = (
+                user
+                + "\n\nIMPORTANT OUTPUT CONSTRAINTS:\n"
+                + "- Output ONLY a single JSON object.\n"
+                + "- The JSON object must contain ONLY keys: C, R, P.\n"
+                + "- Do not wrap JSON in markdown fences.\n"
+        )
+
+        resp = self.generator_client.chat.completions.create(
+            model=self.generator.model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.0,
+            max_tokens=min(self.max_tokens, 512),
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        raw = self._safe_load_json(text)
+        schema = raw.get("final_answer", raw)
+        if isinstance(schema, str):
+            schema = self._safe_load_json(schema)
+        if not isinstance(schema, dict):
+            schema = {}
+        schema = normalize_edt_schema(schema, ctx)
+
+        # --------- Step 2: self-refine loop (feedback -> iterate) ---------
+        rounds = int(getattr(self, "refine_rounds", 0) or 0)
+        rounds = max(0, rounds)
+
+        for r in range(rounds):
+            fb_sys, fb_user = self._build_edt_self_refine_feedback_prompt(ctx=ctx, schema=schema)
+            fb_resp = self.generator_client.chat.completions.create(
+                model=self.generator.model,
+                messages=[{"role": "system", "content": fb_sys}, {"role": "user", "content": fb_user}],
+                temperature=0.2,
+                max_tokens=min(self.max_tokens, 256),
+            )
+            fb_text = (fb_resp.choices[0].message.content or "").strip()
+            fb_json = self._safe_load_json(fb_text)
+
+            # If reviewer says valid, early stop (self-refine’s early-stop spirit)
+            if isinstance(fb_json, dict) and fb_json.get("is_valid") is True:
+                break
+
+            it_sys, it_user = self._build_edt_self_refine_iterate_prompt(ctx=ctx, schema=schema,
+                                                                         feedback_json=fb_json or {})
+            it_resp = self.generator_client.chat.completions.create(
+                model=self.generator.model,
+                messages=[{"role": "system", "content": it_sys}, {"role": "user", "content": it_user}],
+                temperature=0.0,
+                max_tokens=min(self.max_tokens, 512),
+            )
+            it_text = (it_resp.choices[0].message.content or "").strip()
+            it_raw = self._safe_load_json(it_text)
+            new_schema = it_raw.get("final_answer", it_raw)
+            if isinstance(new_schema, str):
+                new_schema = self._safe_load_json(new_schema)
+            if not isinstance(new_schema, dict):
+                new_schema = {}
+
+            schema = normalize_edt_schema(new_schema, ctx)
+
+        return schema
+
+    # ==========================================================
+    # EDT evaluation entry (single-pass; uses seriousgame_tools pipeline)
+    # ==========================================================
+    def run_edt(
+        self,
+        mode: str,
+        test_samples: List[Dict[str, Any]],
+        data_processor: Any,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        _ = data_processor
+        ctx = edt_prepare_run(
+            mode=mode,
+            test_samples=test_samples,
+            config=config,
+            allowed_modes=self.SUPPORTED_MODES,
+        )
+        results, error_log = edt_evaluate_run(agent=self, test_samples=test_samples, config=config, ctx=ctx)
+        edt_save_run(results=results, error_log=error_log, config=config, ctx=ctx)
+        return results
 
     # ==========================================================
     # Consulting support: on_case_start / reply / on_case_end
@@ -396,8 +610,7 @@ class SelfRefineAgent:
     # ==========================================================
     # Unified run with consulting routing
     # ==========================================================
-
-    def run(
+    def run_bizbench(
         self,
         mode: str,
         test_samples: Optional[List[Dict[str, Any]]],
@@ -473,9 +686,28 @@ class SelfRefineAgent:
 
         return results
 
+    # ==========================================================
+    # Unified entry point (router)
+    # ==========================================================
+    def run(
+        self,
+        mode: str,
+        test_samples: Optional[List[Dict[str, Any]]],
+        data_processor,
+        config: Dict[str, Any],
+    ):
+        """
+        Route evaluation by dataset.
 
-
-
-
-
-
+        - EDT: run_edt
+        - Otherwise: run_bizbench (original SelfRefine behavior, including Consulting routing)
+        """
+        task_name = str(config.get("task_name", getattr(data_processor, "task_name", ""))).lower()
+        if "edt" in task_name:
+            return self.run_edt(
+                mode=mode,
+                test_samples=test_samples or [],
+                data_processor=data_processor,
+                config=config,
+            )
+        return self.run_bizbench(mode=mode, test_samples=test_samples, data_processor=data_processor, config=config)

@@ -56,6 +56,8 @@ try:
 except Exception:  # ImportError 等
     _RawMemory = None  # 在未安装 mem0 时给出清晰错误
 
+OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', "http://35.220.164.252:3888/v1/")
+API_KEY = os.getenv('OPENAI_API_KEY', '')
 
 class Mem0Memory:
     """
@@ -73,6 +75,28 @@ class Mem0Memory:
         run_id: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
+        self.config = config
+        if self.config is None:
+            self.config = {
+                "llm": {  # 这是主 LLM，Mem0 用它来做信息抽取/关系抽取等
+                    "provider": "openai",
+                    "config": {
+                        "api_key": API_KEY,  # 你自己的 key，随便起名也行，只要服务端接受
+                        "openai_base_url": OPENAI_BASE_URL,
+                        "model": "deepseek-v3",  # 这里写你那台服务暴露出来的模型名
+                        "temperature": 0.1,
+                    },
+                },
+                "embedder": {
+                    "provider": "openai",
+                    "config": {
+                        "api_key": API_KEY,  # 你自己的 key，随便起名也行，只要服务端接受
+                        "openai_base_url": OPENAI_BASE_URL,
+                        "model": "text-embedding-3-small",  # 这里写你那台服务暴露出来的模型名
+                        "embedding_dims": 1536
+                    },
+                }
+            }
         if _RawMemory is None:
             raise ImportError(
                 "mem0 package is not installed. Please install `mem0` before using Mem0Agent."
@@ -80,15 +104,7 @@ class Mem0Memory:
 
         # 简单策略：直接用默认配置初始化 Memory；
         # 如有需要，可以通过 config 传入 from_config 的参数。
-        if config is None:
-            self._mem = _RawMemory()
-        else:
-            # 兼容 v1.0+ 的 from_config 接口，如果未来需要自定义存储后端等
-            try:
-                self._mem = _RawMemory.from_config(config)
-            except Exception:
-                # 回退到默认配置
-                self._mem = _RawMemory()
+        self._mem = _RawMemory.from_config(self.config)
 
         self._user_id = user_id
         self._run_id = run_id
@@ -618,6 +634,96 @@ class Mem0Agent:
     # EDT 决策
     # ==================================================================
 
+    def _record_edt_experience(
+        self,
+        scenario: Dict[str, Any],
+        schema: Dict[str, Any],
+        metrics: Dict[str, Any],
+        repeat_idx: int,
+    ) -> None:
+        """
+        EDT 场景重复运行后的记忆写入接口（online 模式用）。
+
+        预期由 utils.seriousgame_tools.evaluate_edt_set 在每次重复实验结束后调用：
+            agent._record_edt_experience(scenario, schema, metrics, repeat_idx)
+
+        参数说明
+        ----------
+        scenario : dict
+            原始测试样本（base scenario 的描述、配置等），不做假设，直接序列化为文本。
+        schema : dict
+            本次 run 中 agent 输出的「原始 schema」（尚未或已经 normalize 均可，
+            这里仅作为记录）。
+        metrics : dict
+            本次 run 的学习用指标（例如 accumulated_earnings 等 5 个量，或包含更多字段）。
+        repeat_idx : int
+            同一 base scenario 下的第几次重复试验（从 0 或 1 开始均可，由调用端约定）。
+        """
+        # 如果全局关闭 writeback，这里直接跳过，避免在纯评测模式下写记忆
+        if not getattr(self, "writeback", True):
+            return
+        # 1) 尝试识别一个可读的 scenario_id，方便后续检索
+        try:
+            scenario_id = (
+                scenario.get("scenario_id")
+                or scenario.get("id")
+                or scenario.get("name")
+                or "unknown"
+            )
+        except Exception:
+            scenario_id = "unknown"
+
+        # 2) 将 scenario / schema / metrics 序列化为文本，并做长度裁剪
+        try:
+            scenario_repr = json.dumps(scenario, ensure_ascii=False)
+        except Exception:
+            scenario_repr = str(scenario)
+
+        max_ctx = int(getattr(self, "writeback_max_chars_context", 2000))
+        if len(scenario_repr) > max_ctx:
+            scenario_repr = scenario_repr[:max_ctx] + "...(truncated)"
+
+        try:
+            schema_repr = json.dumps(schema, ensure_ascii=False)
+        except Exception:
+            schema_repr = str(schema)
+        # schema 通常比 scenario 短，这里给一个单独上限以防万一
+        if len(schema_repr) > 800:
+            schema_repr = schema_repr[:800] + "...(truncated)"
+
+        try:
+            metrics_repr = json.dumps(metrics, ensure_ascii=False)
+        except Exception:
+            metrics_repr = str(metrics)
+
+        # 3) 组织成一条 mem0 的「记忆文本」
+        note_lines = [
+            f"The result of simulation {int(repeat_idx)}:",
+            "Chosen schema (agent output):",
+            schema_repr,
+            "",
+            "Outcome metrics (learning signals):",
+            metrics_repr,
+        ]
+        note = "\n".join(note_lines)
+
+        meta = {
+            "task": "edt",
+            "scenario_id": str(scenario_id),
+            "repeat_idx": int(repeat_idx),
+        }
+        # 4) 实际写入 mem0；加锁避免多线程环境下竞争（与 BizBench 写回逻辑保持一致风格）
+        try:
+            lock = getattr(self, "_mem_lock", None)
+            if lock is not None:
+                with lock:
+                    self.memory.add(note, meta=meta)
+            else:
+                self.memory.add(note, meta=meta)
+        except Exception:
+            # 记忆写入失败不应该中断评测，静默忽略
+            return
+
     async def _decide_edt_scenario_schema(
         self,
         base_summary: Dict[str, Any],
@@ -633,8 +739,69 @@ class Mem0Agent:
             max_steps_hint=(scenario_meta or {}).get("max_steps"),
         )
 
-        system, user = render_edt_prompt(ctx)
-        raw = self._call_llm_json(system, user)
+        # 2) 设计检索 query：优先匹配同一 scenario_id，其次匹配所有 EDT 经验
+        retrieved_blocks: List[str] = []
+        if self.memory is not None:
+            try:
+                # 尝试拿一个可读的 scenario_id
+                scenario_id = (
+                    (scenario_meta or {}).get("scenario_id")
+                    or ctx.get("scenario_id")
+                    or "unknown"
+                )
+                scenario_id = str(scenario_id)
+
+                # (a) 主查询：同一 scenario_id 的 EDT 经验
+                primary_query = f"What is the chosen schema and the corresponding outcome of all simulations?"
+                primary_text = self.memory.retrieve(primary_query, k=self.retrieve_k)
+                if primary_text and primary_text.strip():
+                    retrieved_blocks.append(primary_text.strip())
+
+                # (b) 补充查询：所有 EDT 经验（如果主查询结果很少）
+                combined_len = sum(len(b) for b in retrieved_blocks)
+                if combined_len < 1000:  # 经验太少时再补一点全局的
+                    fallback_query = "[EDT]"
+                    k_fb = max(1, self.retrieve_k // 2)
+                    fallback_text = self.memory.retrieve(fallback_query, k=k_fb)
+                    if fallback_text and fallback_text.strip():
+                        retrieved_blocks.append(fallback_text.strip())
+
+            except Exception:
+                # 检索失败不影响主流程
+                retrieved_blocks = []
+
+        # 合并 & 截断检索文本，避免 prompt 爆炸
+        retrieved_text = "\n\n".join(retrieved_blocks).strip()
+        if retrieved_text and len(retrieved_text) > 4000:
+            retrieved_text = retrieved_text[:4000] + "\n...(truncated)"
+
+        # 3) 先用工具函数构造基础 EDT system/user prompt
+        system, base_user = render_edt_prompt(ctx)
+
+        # 再在 Agent 这一层，把检索到的经验直接拼接到 user prompt 尾部
+        if retrieved_text:
+            user = (
+                base_user
+                + "\n\n=== PAST POLICIES AND OUTCOMES FROM PREVIOUS RUNS ===\n"
+                  "The following notes summarize your previous EDT simulation runs stored in memory. "
+                  "Each block typically records your chosen C, R and project windows together with "
+                  "outcome metrics such as accumulated earnings, revenue, expenses, and profit margin.\n\n"
+                  "Use these as qualitative hints, not ground truth. In particular:\n"
+                  "- If many past runs with similar C/R/P configurations produced negative or very low profit,\n"
+                  "  actively explore different strategies in this run (e.g. change C, adjust R up/down,\n"
+                  "  or enable/disable different projects) instead of repeating the same choices.\n"
+                  "- If some past runs achieved clearly better profit, treat them as promising directions,\n"
+                  "  but still introduce some variation rather than copying any past decision verbatim.\n\n"
+                  "Balance exploitation of good patterns with exploration of new strategies, especially\n"
+                  "when past performance is poor. You should make a fresh, well-reasoned choice of C, R,\n"
+                  "and project windows for THIS run, informed but not constrained by past runs.\n\n"
+                + retrieved_text
+            )
+        else:
+            user = base_user
+
+        # 4) 调用 LLM，解析为 JSON，再归一化 schema
+        raw = self._call_llm_json(system=system, user=user)
         return normalize_edt_schema(raw, ctx)
 
 
