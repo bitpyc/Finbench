@@ -7,3 +7,5 @@ current_todo.md
 *.pyc
 *.log
 docs/AOA_expected.md
+paper_latex/
+plot/
