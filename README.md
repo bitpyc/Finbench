@@ -1,6 +1,6 @@
-# FirmBench: A Benchmark for Strategic Reasoning and Decision-Making of LLM Agents in Enterprise Simulation
+# EnterpriseBench: A Benchmark for Strategic Reasoning and Decision-Making of LLM Agents in Enterprise Simulation
 
-FirmBench is a comprehensive benchmarking platform specifically designed to evaluate the **strategic reasoning and decision-making capabilities** of Large Language Model (LLM) agents in complex enterprise scenarios. Unlike traditional static QA benchmarks, FirmBench introduces interactive consulting cases and dynamic serious games to authentically simulate information asymmetry, sequential feedback, and long-term planning challenges inherent in corporate decision-making.
+EnterpriseBench is a comprehensive benchmarking platform specifically designed to evaluate the **strategic reasoning and decision-making capabilities** of Large Language Model (LLM) agents in complex enterprise scenarios. Unlike traditional static QA benchmarks, EnterpriseBench introduces interactive consulting cases and dynamic serious games to authentically simulate information asymmetry, sequential feedback, and long-term planning challenges inherent in corporate decision-making.
 
 ---
 
@@ -28,7 +28,7 @@ This module includes two dynamic simulation environments to evaluate agents' lon
 
 ## Agent-based Taxonomy
 
-FirmBench proposes an agent-centric classification framework. Using an expert model, all samples are re-annotated based on required cognitive capabilities and difficulty scores, enabling fine-grained performance diagnosis beyond traditional dataset boundaries.
+EnterpriseBench proposes an agent-centric classification framework. Using an expert model, all samples are re-annotated based on required cognitive capabilities and difficulty scores, enabling fine-grained performance diagnosis beyond traditional dataset boundaries.
 
 - **Information Extraction (IE)**: Accurately retrieving facts from documents.
 - **Numerical Calculation (NC)**: Mathematical reasoning involving arithmetic logic or code synthesis.
@@ -86,7 +86,7 @@ For more details, please refer to: [docs/AOA.md](docs/AOA.md)
 
 ## Citation
 
-If you use FirmBench in your research, please cite our paper:
+If you use EnterpriseBench in your research, please cite our paper:
 
 ```bibtex
 
